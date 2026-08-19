@@ -1,0 +1,40 @@
+"""Command-line entry point for full-dataset flicker correction."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from astr_ir.flicker.processor import FlickerConfig, run_batch
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset-root", type=Path, default=PROJECT_ROOT / "data" / "raw" / "our_dataset")
+    parser.add_argument("--output-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "flicker")
+    parser.add_argument("--direction", choices=["auto", "row", "column"], default="auto")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--limit-per-sequence", type=int)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    config = FlickerConfig(direction=args.direction)
+    stats = run_batch(
+        args.dataset_root,
+        args.output_root,
+        config=config,
+        overwrite=args.overwrite,
+        limit_per_sequence=args.limit_per_sequence,
+    )
+    print(stats.groupby(["sequence", "status"]).size().to_string())
+    print(f"\nStatistics: {args.output_root / 'flicker_statistics.csv'}")
+
+
+if __name__ == "__main__":
+    main()
