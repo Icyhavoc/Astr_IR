@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Office lock files
+~$*
+
+# Scientific data: keep outside ordinary Git history
+data/raw/our_dataset/
+data/processed/
+
+# Generated diagnostics
+figures/flicker_output/
+figures/background_output/
+
+# Local logs and scratch files
+*.log
+tmp/
+scratch/
