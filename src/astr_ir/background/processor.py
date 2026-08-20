@@ -64,6 +64,12 @@ class BackgroundConfig:
             raise ValueError("background box sizes must be at least 4 pixels")
         if self.ring_inner_radius < 1 or self.ring_width < 1:
             raise ValueError("ring radii must be positive")
+        if self.rough_sigma_clip <= 0 or self.final_sigma_clip <= 0 or self.bright_sigma <= 0:
+            raise ValueError("sigma thresholds must be positive")
+        if not 0 <= self.rough_exclude_percentile <= 100:
+            raise ValueError("rough_exclude_percentile must be in [0, 100]")
+        if not 0 <= self.final_exclude_percentile <= 100:
+            raise ValueError("final_exclude_percentile must be in [0, 100]")
         sizes = {
             len(self.tier_gaussian_sigmas),
             len(self.tier_threshold_sigmas),
@@ -72,10 +78,22 @@ class BackgroundConfig:
         }
         if len(sizes) != 1 or next(iter(sizes)) == 0:
             raise ValueError("all source-tier parameter tuples must have equal non-zero length")
+        if any(value <= 0 for value in self.tier_gaussian_sigmas):
+            raise ValueError("tier Gaussian sigmas must be positive")
+        if any(value <= 0 for value in self.tier_threshold_sigmas):
+            raise ValueError("tier thresholds must be positive")
+        if any(value < 1 for value in self.tier_min_pixels):
+            raise ValueError("tier minimum component sizes must be positive")
+        if any(value < 0 for value in self.tier_dilation_radii):
+            raise ValueError("tier dilation radii must be non-negative")
         if any(size < 1 or size % 2 == 0 for size in (self.rough_filter_size, self.final_filter_size)):
             raise ValueError("background filter sizes must be positive odd integers")
         if not 0 <= self.min_large_scale_reduction < 1:
             raise ValueError("min_large_scale_reduction must be in [0, 1)")
+        if self.validation_block_size < 1 or self.max_noise_increase < 0:
+            raise ValueError("validation block size must be positive and noise tolerance non-negative")
+        if self.photometry_gate_snr < 0 or not 0 <= self.max_photometry_change < 1:
+            raise ValueError("photometry thresholds are outside their valid range")
 
 
 @dataclass
@@ -495,10 +513,12 @@ def subtract_background(
     )
     target_snr = float(target.get("snr", np.nan)) if target else float("nan")
     photometry_gate_active = np.isfinite(target_snr) and target_snr >= config.photometry_gate_snr
-    photometry_ok = (
+    photometry_verifiable = bool(
+        np.isfinite(flux_before) and flux_before != 0 and np.isfinite(flux_after_candidate)
+    )
+    photometry_ok = bool(
         not photometry_gate_active
-        or not np.isfinite(flux_change_candidate)
-        or abs(flux_change_candidate) <= config.max_photometry_change
+        or (photometry_verifiable and abs(flux_change_candidate) <= config.max_photometry_change)
     )
     finite_model = bool(np.all(np.isfinite(candidate_model)))
     improves = np.isfinite(reduction_candidate) and reduction_candidate >= config.min_large_scale_reduction
@@ -510,6 +530,8 @@ def subtract_background(
         applied, status = False, "rejected_insufficient_improvement"
     elif not noise_ok:
         applied, status = False, "rejected_noise_increase"
+    elif photometry_gate_active and not photometry_verifiable:
+        applied, status = False, "rejected_photometry_unverifiable"
     elif not photometry_ok:
         applied, status = False, "rejected_photometry_change"
     else:
@@ -560,6 +582,7 @@ def subtract_background(
         "photometry_change_fraction": flux_change,
         "candidate_photometry_change_fraction": flux_change_candidate,
         "photometry_gate_active": photometry_gate_active,
+        "photometry_verifiable": photometry_verifiable,
         "source_edge_bias_after": _source_edge_bias(corrected, source, base),
         "candidate_source_edge_bias_after": _source_edge_bias(candidate, source, base),
     }
@@ -614,12 +637,24 @@ def write_fits_products(
     original32 = result.original.astype(np.float32)
     model32 = result.background_model.astype(np.float32)
     corrected32 = original32 - model32
-    equation_error = float(np.max(np.abs(corrected32 - (original32 - model32))))
     fits.PrimaryHDU(
         corrected32, header=_output_header(header, result, "subtracted", config)
     ).writeto(corrected_path, overwrite=overwrite, output_verify="silentfix")
     fits.PrimaryHDU(model32, header=_output_header(header, result, "model", config)).writeto(
         model_path, overwrite=overwrite, output_verify="silentfix"
+    )
+    written_subtracted = np.asarray(fits.getdata(corrected_path), dtype=np.float32)
+    written_model = np.asarray(fits.getdata(model_path), dtype=np.float32)
+    expected = original32 - written_model
+    if written_subtracted.shape != expected.shape or not np.array_equal(
+        np.isfinite(written_subtracted), np.isfinite(expected)
+    ):
+        raise RuntimeError("Written background products have incompatible shape or finite-pixel masks")
+    finite = np.isfinite(expected)
+    equation_error = (
+        float(np.max(np.abs(written_subtracted[finite] - expected[finite])))
+        if np.any(finite)
+        else 0.0
     )
     return corrected_path, model_path, equation_error
 

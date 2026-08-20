@@ -33,7 +33,7 @@ src/astr_ir/flicker/
 scripts/
 ├─ run_flicker.py                     # 命令行批处理入口
 └─ build_flicker_notebook.py          # 重新生成 Notebook 结构
-tests/test_flicker.py                 # 8 个自动测试
+tests/test_flicker.py                 # 11 个自动测试
 notebooks/flicker/01_flicker_noise_correction.ipynb
 figures/flicker_output/               # Notebook 生成的诊断图
 data/processed/flicker/
@@ -67,11 +67,12 @@ detector_mask = (DeadBlindMap != 0) | (NoiseBlindMap != 0)
 - 边缘掩膜：默认屏蔽四边各 24 像素。
 - 二维背景：64×64 分块中位数、粗网格高斯平滑、三次插值。
 - 方向分数：逐行/列剖面稳健标准差除以中位数的预期统计误差。
-- 一维模型：Sigma 裁剪中位数后使用 5 点中值滤波，并移除直流分量。
+- 一维模型：Sigma 裁剪中位数后首选 5 点中值滤波，并移除直流分量；局部门失败时依次尝试 3 点和不平滑的 1 点剖面。
 - 弱条纹：方向分数低于 1.6 时返回 `not_needed_weak_stripe`，模型为零。
 - 改善门：选定方向的剖面稳健标准差必须下降至少 30%。
 - 噪声门：高频背景噪声不得增加超过 2%。
-- 测光门：SNR≥10 的正常恒星孔径流量变化必须不超过 1%；低 SNR 帧仍记录数值，但不使用不稳定的百分比否决。
+- 测光门：SNR≥10 的正常恒星孔径流量变化必须可验证且不超过 1%；低 SNR 帧仍记录数值，但不使用不稳定的百分比否决。
+- 局部门：恶化行比例不超过 26%，增加超过 10 DN 的行比例不超过 13%，最坏单行增量不超过 80 DN。
 - 任一质量门失败：输出原图的 float32 副本和零模型，并在统计表中记录原因，不强行校正。
 
 所有输出 FITS 为 float32（`BITPIX=-32`），保留并规范化原始科学头，同时写入 `FLK PROD`、
@@ -84,10 +85,12 @@ flicker_corrected = original.astype(float32) - flicker_model
 ## 当前全量结果
 
 - 160/160 帧完成，全部自动选择 `row`，即图像中的水平条纹。
-- 156 帧通过质量门并校正；4 帧因候选目标星流量变化超过 1% 自动退回原图/零模型。
-- 已校正帧的行剖面稳健标准差下降 49.11%–62.99%，中位数为 55.22%，全部超过 30%。
+- 155 帧通过全部质量门并校正；102 帧使用首选 5 点剖面，53 帧因局部门回退到 1 点剖面，3 点剖面未成为最终候选。
+- 5 帧安全退回原图/零模型：2 帧的全部候选均违反测光门，3 帧没有同时满足局部与测光约束的候选。
+- 已校正帧的行剖面稳健标准差下降 50.81%–100%，中位数为 57.79%，全部超过 30%。
 - 已校正帧最大高频背景噪声比为 1.00045，没有明显增加。
 - 80 个 SNR≥10 的正常星帧最终最大绝对流量变化为 0.9722%。
+- 已校正帧每帧局部恶化行数中位数为 233，增加超过 10 DN 的行数中位数为 109；最大值分别为 253 和 126，最坏单行增量由旧方案的 146.76 DN 限制到 78.87 DN。
 - 320 个输出 FITS 均通过 Astropy 严格 FITS 校验。
 - `corrected = original - model` 的最大 float32 误差为 0。
 
@@ -136,6 +139,8 @@ config = FlickerConfig(direction="auto")
 ```
 
 若要调试阈值，可显式设置 `background_block_size`、`profile_smooth_size`、
+`fallback_profile_smooth_sizes`、`max_local_worse_fraction`、
+`max_local_worse_over_threshold_fraction`、`max_local_increase_dn`、
 `min_direction_score`、`min_relative_improvement` 和 `max_photometry_change`。修改后应重新运行 Notebook
 及自动测试，并检查 `figures/flicker_output/` 中的诊断图。
 

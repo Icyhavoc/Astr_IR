@@ -178,7 +178,7 @@ code(
     """
     fig, ax = plt.subplots(figsize=(11, 4), constrained_layout=True)
     ax.plot(selected_diag.profile, label="Sigma-clipped median", lw=1, alpha=0.65)
-    ax.plot(result.smoothed_profile, label=f"median-filtered (size={config.profile_smooth_size})", lw=1.5)
+    ax.plot(result.smoothed_profile, label=f"selected model (size={result.profile_smooth_size})", lw=1.5)
     ax.set(xlabel=result.selected_direction, ylabel="DN", title="One-dimensional flicker profile")
     ax.legend()
     save_figure(fig, FIGURE_ROOT / "05_smoothed_profile.png")
@@ -206,7 +206,8 @@ md(
     ## 主要工作 7/9：从图像扣除条纹，再恢复低频背景
 
     实现等价于 `(original - background - model) + background`，即严格的 `corrected = original - model`。
-    弱条纹或质量门失败时，模型置零并返回“不需要校正”或具体拒绝原因，绝不强行扣除。
+    首选 5 点模型；若局部恶化行占比或最坏增量越界，则依次尝试 3 点和 1 点模型。
+    弱条纹或所有候选均未通过质量门时，模型置零并返回具体原因，绝不强行扣除。
     """
 )
 code(
@@ -287,6 +288,11 @@ code(
         "min reduction among corrected [%]": 100 * applied["relative_reduction"].min(),
         "corrected frames meeting >=30%": int((applied["relative_reduction"] >= 0.30).sum()),
         "max background-noise ratio": applied["background_noise_ratio"].max(),
+        "selected size=5 frames": int((applied["selected_profile_smooth_size"] == 5).sum()),
+        "selected size=3 frames": int((applied["selected_profile_smooth_size"] == 3).sum()),
+        "selected size=1 frames": int((applied["selected_profile_smooth_size"] == 1).sum()),
+        "max local line increase [DN]": applied["local_max_increase_dn"].max(),
+        "max lines degraded over 10 DN": int(applied["local_worse_over_threshold_lines"].max()),
         "normal-star frames (SNR>=10)": len(normal_stars),
         "max |normal-star flux change| [%]": 100 * normal_stars["photometry_change_fraction"].abs().max(),
         "max float32 equation error": stats["equation_max_abs_error_float32"].max(),

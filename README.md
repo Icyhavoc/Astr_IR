@@ -68,7 +68,7 @@ python scripts/run_background.py --overwrite
 # 运行全部自动测试
 python -m pytest -q
 
-# 严格校验 640 个产品并重算科学质量指标
+# 严格校验 640 个产品、目录清单、科学公式和局部质量门
 python scripts/validate_products.py
 ```
 

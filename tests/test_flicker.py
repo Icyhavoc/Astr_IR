@@ -13,6 +13,7 @@ from astr_ir.flicker.processor import (
     load_detector_mask,
     load_fits,
     make_known_source_mask,
+    profile_degradation_metrics,
     write_fits_products,
 )
 
@@ -100,6 +101,45 @@ def test_manual_direction_is_respected():
     image, _ = synthetic_image("row")
     result = correct_flicker(image, config=config(direction="column", min_direction_score=0.0, min_relative_improvement=0.0))
     assert result.selected_direction == "column"
+
+
+def test_local_quality_gate_falls_back_to_unsmoothed_profile():
+    image, _ = synthetic_image("row")
+    rng = np.random.default_rng(99)
+    image = image + rng.normal(0.0, 25.0, image.shape[0])[:, None]
+    result = correct_flicker(
+        image,
+        config=config(
+            fallback_profile_smooth_sizes=(1,),
+            max_local_worse_fraction=0.0,
+            max_local_worse_over_threshold_fraction=0.0,
+            max_local_increase_dn=0.0,
+        ),
+    )
+    assert result.applied
+    assert result.profile_smooth_size == 1
+    assert result.metrics["profile_fallback_used"]
+    assert result.metrics["local_worse_lines"] == 0
+    assert result.metrics["local_gate_passed"]
+
+
+def test_high_snr_unverifiable_photometry_is_rejected():
+    image, _ = synthetic_image("row")
+    result = correct_flicker(image, target={"snr": 100.0}, config=config())
+    assert not result.applied
+    assert result.status == "rejected_photometry_unverifiable"
+    assert np.count_nonzero(result.flicker_model) == 0
+
+
+def test_profile_degradation_metrics_count_local_regressions():
+    metrics = profile_degradation_metrics(
+        np.array([-3.0, -1.0, 1.0, 3.0]),
+        np.array([-5.0, -1.0, 1.0, 5.0]),
+        threshold_dn=1.0,
+    )
+    assert metrics["local_worse_lines"] == 2
+    assert metrics["local_worse_over_threshold_lines"] == 2
+    assert metrics["local_max_increase_dn"] == 2.0
 
 
 def test_dead_and_noise_maps_are_unioned_without_dq(tmp_path: Path):

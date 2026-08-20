@@ -40,6 +40,7 @@ class FlickerConfig:
     sigma_clip: float = 3.0
     sigma_clip_iters: int = 5
     profile_smooth_size: int = 5
+    fallback_profile_smooth_sizes: tuple[int, ...] = (3, 1)
     source_sigma: float = 6.0
     source_dilation: int = 8
     known_source_radius_scale: float = 1.25
@@ -48,16 +49,39 @@ class FlickerConfig:
     max_noise_increase: float = 0.02
     photometry_gate_snr: float = 10.0
     max_photometry_change: float = 0.01
+    local_degradation_threshold_dn: float = 10.0
+    max_local_worse_fraction: float = 0.26
+    max_local_worse_over_threshold_fraction: float = 0.13
+    max_local_increase_dn: float = 80.0
 
     def validate(self) -> None:
         if self.direction not in {"auto", "row", "column"}:
             raise ValueError("direction must be 'auto', 'row', or 'column'")
         if self.edge_width < 0 or self.background_block_size < 4:
             raise ValueError("edge_width must be >= 0 and block size >= 4")
-        if self.profile_smooth_size < 1 or self.profile_smooth_size % 2 == 0:
-            raise ValueError("profile_smooth_size must be a positive odd integer")
+        sizes = (self.profile_smooth_size, *self.fallback_profile_smooth_sizes)
+        if any(size < 1 or size % 2 == 0 for size in sizes):
+            raise ValueError("all profile smooth sizes must be positive odd integers")
+        if self.sigma_clip <= 0 or self.sigma_clip_iters < 1:
+            raise ValueError("sigma_clip and sigma_clip_iters must be positive")
+        if self.background_smooth_sigma_blocks < 0:
+            raise ValueError("background_smooth_sigma_blocks must be non-negative")
+        if self.source_sigma <= 0 or self.source_dilation < 0:
+            raise ValueError("source_sigma must be positive and source_dilation non-negative")
+        if self.min_direction_score < 0:
+            raise ValueError("min_direction_score must be non-negative")
         if not 0 <= self.min_relative_improvement < 1:
             raise ValueError("min_relative_improvement must be in [0, 1)")
+        if self.max_noise_increase < 0:
+            raise ValueError("max_noise_increase must be non-negative")
+        if self.photometry_gate_snr < 0 or not 0 <= self.max_photometry_change < 1:
+            raise ValueError("photometry thresholds are outside their valid range")
+        if self.local_degradation_threshold_dn < 0 or self.max_local_increase_dn < 0:
+            raise ValueError("local degradation DN thresholds must be non-negative")
+        if not 0 <= self.max_local_worse_fraction <= 1:
+            raise ValueError("max_local_worse_fraction must be in [0, 1]")
+        if not 0 <= self.max_local_worse_over_threshold_fraction <= 1:
+            raise ValueError("max_local_worse_over_threshold_fraction must be in [0, 1]")
 
 
 @dataclass
@@ -87,9 +111,10 @@ class CorrectionResult:
     column_diagnostic: DirectionDiagnostic
     selected_direction: Literal["row", "column"]
     smoothed_profile: np.ndarray
+    profile_smooth_size: int
     applied: bool
     status: str
-    metrics: dict[str, float | str | bool]
+    metrics: dict[str, float | int | str | bool]
 
 
 def robust_std(values: np.ndarray) -> float:
@@ -347,6 +372,57 @@ def expand_profile(profile: np.ndarray, shape: tuple[int, int], direction: str) 
     raise ValueError("direction must be row or column")
 
 
+def profile_degradation_metrics(
+    before_profile: np.ndarray,
+    after_profile: np.ndarray,
+    threshold_dn: float,
+) -> dict[str, float | int]:
+    """Measure line-by-line residual degradation after removing profile DC levels."""
+
+    before = np.asarray(before_profile, dtype=np.float64)
+    after = np.asarray(after_profile, dtype=np.float64)
+    if before.shape != after.shape:
+        raise ValueError("before and after profiles must have the same shape")
+    valid = np.isfinite(before) & np.isfinite(after)
+    if not np.any(valid):
+        return {
+            "local_line_count": 0,
+            "local_worse_lines": 0,
+            "local_worse_fraction": float("nan"),
+            "local_worse_over_threshold_lines": 0,
+            "local_worse_over_threshold_fraction": float("nan"),
+            "local_max_increase_dn": float("nan"),
+        }
+    before = before[valid] - np.median(before[valid])
+    after = after[valid] - np.median(after[valid])
+    increase = np.abs(after) - np.abs(before)
+    worse = increase > 0
+    worse_over_threshold = increase > threshold_dn
+    count = int(increase.size)
+    return {
+        "local_line_count": count,
+        "local_worse_lines": int(np.count_nonzero(worse)),
+        "local_worse_fraction": float(np.mean(worse)),
+        "local_worse_over_threshold_lines": int(np.count_nonzero(worse_over_threshold)),
+        "local_worse_over_threshold_fraction": float(np.mean(worse_over_threshold)),
+        "local_max_increase_dn": float(np.max(increase)),
+    }
+
+
+def _local_gate_passes(metrics: Mapping[str, float | int], config: FlickerConfig) -> bool:
+    worse_fraction = float(metrics["local_worse_fraction"])
+    severe_fraction = float(metrics["local_worse_over_threshold_fraction"])
+    max_increase = float(metrics["local_max_increase_dn"])
+    return bool(
+        np.isfinite(worse_fraction)
+        and np.isfinite(severe_fraction)
+        and np.isfinite(max_increase)
+        and worse_fraction <= config.max_local_worse_fraction
+        and severe_fraction <= config.max_local_worse_over_threshold_fraction
+        and max_increase <= config.max_local_increase_dn
+    )
+
+
 def aperture_photometry(image: np.ndarray, target: Mapping | None) -> float:
     """Background-subtracted circular aperture flux using CSV radii."""
 
@@ -399,68 +475,112 @@ def correct_flicker(
         residual, combined, "column", config.sigma_clip, config.sigma_clip_iters
     )
     selected = choose_direction(row, column, config.direction)
-    profile = smooth_profile(selected.profile, config.profile_smooth_size)
-    candidate_model = expand_profile(profile, original.shape, selected.direction)
-    candidate = original - candidate_model
-
     before_metric = selected.robust_std
-    after_diag = sigma_clipped_profile(
-        candidate - background,
-        combined,
-        selected.direction,
-        config.sigma_clip,
-        config.sigma_clip_iters,
-    )
-    candidate_reduction = float(
-        1.0 - after_diag.robust_std / max(before_metric, np.finfo(float).eps)
-    )
     noise_before = _background_noise(original, combined)
-    noise_after_candidate = _background_noise(candidate, combined)
-    noise_ratio_candidate = float(noise_after_candidate / max(noise_before, np.finfo(float).eps))
     flux_before = aperture_photometry(original, target)
-    flux_after_candidate = aperture_photometry(candidate, target)
-    flux_change_candidate = (
-        float((flux_after_candidate - flux_before) / flux_before)
-        if np.isfinite(flux_before) and flux_before != 0 and np.isfinite(flux_after_candidate)
-        else float("nan")
-    )
-
     detected = selected.score >= config.min_direction_score
-    improves = candidate_reduction >= config.min_relative_improvement
-    noise_ok = noise_ratio_candidate <= 1.0 + config.max_noise_increase
     target_snr = float(target.get("snr", np.nan)) if target else float("nan")
     photometry_gate_active = np.isfinite(target_snr) and target_snr >= config.photometry_gate_snr
-    photometry_ok = (
-        not photometry_gate_active
-        or not np.isfinite(flux_change_candidate)
-        or abs(flux_change_candidate) <= config.max_photometry_change
-    )
+    smooth_sizes = tuple(dict.fromkeys((config.profile_smooth_size, *config.fallback_profile_smooth_sizes)))
+    candidates: list[dict] = []
+    for smooth_size in smooth_sizes:
+        profile = smooth_profile(selected.profile, smooth_size)
+        candidate_model = expand_profile(profile, original.shape, selected.direction)
+        candidate = original - candidate_model
+        after_diag = sigma_clipped_profile(
+            candidate - background,
+            combined,
+            selected.direction,
+            config.sigma_clip,
+            config.sigma_clip_iters,
+        )
+        reduction = float(
+            1.0 - after_diag.robust_std / max(before_metric, np.finfo(float).eps)
+        )
+        noise_after = _background_noise(candidate, combined)
+        noise_ratio = float(noise_after / max(noise_before, np.finfo(float).eps))
+        flux_after = aperture_photometry(candidate, target)
+        photometry_verifiable = bool(
+            np.isfinite(flux_before) and flux_before != 0 and np.isfinite(flux_after)
+        )
+        flux_change = (
+            float((flux_after - flux_before) / flux_before)
+            if photometry_verifiable
+            else float("nan")
+        )
+        local_metrics = profile_degradation_metrics(
+            selected.profile,
+            after_diag.profile,
+            config.local_degradation_threshold_dn,
+        )
+        improves = np.isfinite(reduction) and reduction >= config.min_relative_improvement
+        noise_ok = np.isfinite(noise_ratio) and noise_ratio <= 1.0 + config.max_noise_increase
+        photometry_ok = bool(
+            not photometry_gate_active
+            or (photometry_verifiable and abs(flux_change) <= config.max_photometry_change)
+        )
+        local_ok = _local_gate_passes(local_metrics, config)
+        reasons = []
+        if not improves:
+            reasons.append("insufficient_improvement")
+        if not noise_ok:
+            reasons.append("noise_increase")
+        if photometry_gate_active and not photometry_verifiable:
+            reasons.append("photometry_unverifiable")
+        elif not photometry_ok:
+            reasons.append("photometry_change")
+        if not local_ok:
+            reasons.append("local_degradation")
+        candidates.append(
+            {
+                "smooth_size": smooth_size,
+                "profile": profile,
+                "model": candidate_model,
+                "corrected": candidate,
+                "after_diag": after_diag,
+                "reduction": reduction,
+                "noise_after": noise_after,
+                "noise_ratio": noise_ratio,
+                "flux_after": flux_after,
+                "flux_change": flux_change,
+                "photometry_verifiable": photometry_verifiable,
+                "local_metrics": local_metrics,
+                "local_ok": local_ok,
+                "passes": improves and noise_ok and photometry_ok and local_ok,
+                "reasons": reasons,
+            }
+        )
 
+    preferred = candidates[0]
+    chosen = next((candidate for candidate in candidates if detected and candidate["passes"]), None)
     if not detected:
-        applied = False
-        status = "not_needed_weak_stripe"
-    elif not improves:
-        applied = False
-        status = "rejected_insufficient_improvement"
-    elif not noise_ok:
-        applied = False
-        status = "rejected_noise_increase"
-    elif not photometry_ok:
-        applied = False
-        status = "rejected_photometry_change"
+        applied, status = False, "not_needed_weak_stripe"
+    elif chosen is not None:
+        applied, status = True, "corrected"
+    elif all("insufficient_improvement" in candidate["reasons"] for candidate in candidates):
+        applied, status = False, "rejected_insufficient_improvement"
+    elif all("noise_increase" in candidate["reasons"] for candidate in candidates):
+        applied, status = False, "rejected_noise_increase"
+    elif all("photometry_unverifiable" in candidate["reasons"] for candidate in candidates):
+        applied, status = False, "rejected_photometry_unverifiable"
+    elif all("photometry_change" in candidate["reasons"] for candidate in candidates):
+        applied, status = False, "rejected_photometry_change"
+    elif all("local_degradation" in candidate["reasons"] for candidate in candidates):
+        applied, status = False, "rejected_local_degradation"
     else:
-        applied = True
-        status = "corrected"
+        applied, status = False, "rejected_no_safe_profile"
 
+    selected_candidate = chosen if chosen is not None else preferred
     if applied:
-        model = candidate_model
-        corrected = candidate
-        after_metric = after_diag.robust_std
-        reduction = candidate_reduction
-        noise_after = noise_after_candidate
-        noise_ratio = noise_ratio_candidate
-        flux_after = flux_after_candidate
-        flux_change = flux_change_candidate
+        model = selected_candidate["model"]
+        corrected = selected_candidate["corrected"]
+        after_metric = selected_candidate["after_diag"].robust_std
+        reduction = selected_candidate["reduction"]
+        noise_after = selected_candidate["noise_after"]
+        noise_ratio = selected_candidate["noise_ratio"]
+        flux_after = selected_candidate["flux_after"]
+        flux_change = selected_candidate["flux_change"]
+        final_local_metrics = selected_candidate["local_metrics"]
     else:
         model = np.zeros_like(original)
         corrected = original.copy()
@@ -470,8 +590,22 @@ def correct_flicker(
         noise_ratio = 1.0
         flux_after = flux_before
         flux_change = 0.0 if np.isfinite(flux_before) else float("nan")
+        line_count = int(np.count_nonzero(np.isfinite(selected.profile)))
+        final_local_metrics = {
+            "local_line_count": line_count,
+            "local_worse_lines": 0,
+            "local_worse_fraction": 0.0,
+            "local_worse_over_threshold_lines": 0,
+            "local_worse_over_threshold_fraction": 0.0,
+            "local_max_increase_dn": 0.0,
+        }
 
-    metrics: dict[str, float | str | bool] = {
+    rejection_summary = ";".join(
+        f"{candidate['smooth_size']}:{','.join(candidate['reasons']) or 'passed'}"
+        for candidate in candidates
+    )
+
+    metrics: dict[str, float | int | str | bool] = {
         "direction_requested": config.direction,
         "selected_direction": selected.direction,
         "applied": applied,
@@ -482,16 +616,26 @@ def correct_flicker(
         "profile_rstd_before": before_metric,
         "profile_rstd_after": after_metric,
         "relative_reduction": reduction,
-        "candidate_relative_reduction": candidate_reduction,
+        "candidate_relative_reduction": preferred["reduction"],
         "background_noise_before": noise_before,
         "background_noise_after": noise_after,
         "background_noise_ratio": noise_ratio,
-        "candidate_background_noise_ratio": noise_ratio_candidate,
+        "candidate_background_noise_ratio": preferred["noise_ratio"],
         "photometry_before": flux_before,
         "photometry_after": flux_after,
         "photometry_change_fraction": flux_change,
-        "candidate_photometry_change_fraction": flux_change_candidate,
+        "candidate_photometry_change_fraction": preferred["flux_change"],
         "photometry_gate_active": photometry_gate_active,
+        "photometry_verifiable": selected_candidate["photometry_verifiable"],
+        "preferred_profile_smooth_size": config.profile_smooth_size,
+        "selected_profile_smooth_size": int(selected_candidate["smooth_size"]),
+        "profile_fallback_used": bool(
+            applied and selected_candidate["smooth_size"] != config.profile_smooth_size
+        ),
+        "profile_candidate_summary": rejection_summary,
+        "local_gate_passed": bool(not applied or selected_candidate["local_ok"]),
+        **final_local_metrics,
+        **{f"candidate_{key}": value for key, value in preferred["local_metrics"].items()},
         "mask_fraction": float(np.mean(combined)),
         "detector_mask_fraction": float(np.mean(detector)),
         "source_mask_fraction": float(np.mean(source)),
@@ -510,7 +654,8 @@ def correct_flicker(
         row_diagnostic=row,
         column_diagnostic=column,
         selected_direction=selected.direction,
-        smoothed_profile=profile,
+        smoothed_profile=selected_candidate["profile"],
+        profile_smooth_size=int(selected_candidate["smooth_size"]),
         applied=applied,
         status=status,
         metrics=metrics,
@@ -526,6 +671,7 @@ def _output_header(
     out["HIERARCH FLK PROD"] = product
     out["HIERARCH FLK DIR"] = result.selected_direction
     out["HIERARCH FLK APPL"] = bool(result.applied)
+    out["HIERARCH FLK PSMTH"] = int(result.profile_smooth_size)
     out["HIERARCH FLK SCORE"] = round(float(result.metrics["direction_score"]), 6)
     out["HIERARCH FLK REDUC"] = round(float(result.metrics["relative_reduction"]), 6)
     out.add_history("1/f correction implemented by astr_ir.flicker.processor")
@@ -550,12 +696,24 @@ def write_fits_products(
     original32 = result.original.astype(np.float32)
     model32 = result.flicker_model.astype(np.float32)
     corrected32 = original32 - model32
-    equation_error = float(np.max(np.abs(corrected32 - (original32 - model32))))
     fits.PrimaryHDU(corrected32, header=_output_header(header, result, "corrected")).writeto(
         corrected_path, overwrite=overwrite, output_verify="silentfix"
     )
     fits.PrimaryHDU(model32, header=_output_header(header, result, "model")).writeto(
         model_path, overwrite=overwrite, output_verify="silentfix"
+    )
+    written_corrected = np.asarray(fits.getdata(corrected_path), dtype=np.float32)
+    written_model = np.asarray(fits.getdata(model_path), dtype=np.float32)
+    expected = original32 - written_model
+    if written_corrected.shape != expected.shape or not np.array_equal(
+        np.isfinite(written_corrected), np.isfinite(expected)
+    ):
+        raise RuntimeError("Written flicker products have incompatible shape or finite-pixel masks")
+    finite = np.isfinite(expected)
+    equation_error = (
+        float(np.max(np.abs(written_corrected[finite] - expected[finite])))
+        if np.any(finite)
+        else 0.0
     )
     return corrected_path, model_path, equation_error
 

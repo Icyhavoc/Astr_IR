@@ -37,7 +37,7 @@ background_subtracted = flicker_corrected_input - background_model
 
 - 64 像素块背景位置散布至少下降 10%；
 - 相邻像元差分估计的高频噪声不得增加超过 2%；
-- 输入 CSV 中 SNR≥10 的目标星孔径流量变化不得超过 1%；
+- 输入 CSV 中 SNR≥10 的目标星孔径流量必须可验证，且变化不得超过 1%；
 - 背景模型全部为有限数。
 
 若任一质量门失败，科学输出为输入图的 float32 副本，背景模型为零，并在统计表中记录拒绝原因。
@@ -74,7 +74,7 @@ blindmap、源掩膜、边缘掩膜仅用于背景估计和诊断图。
 ## 运行
 
 ```powershell
-cd D:\Astr_IR
+cd <project-root>
 python -m pytest -q
 python scripts/build_background_notebook.py
 python scripts/run_background.py --overwrite
@@ -93,13 +93,13 @@ python scripts/run_background.py --limit-per-sequence 1 --overwrite
 
 - 160/160 帧完成；159 帧通过全部质量门并扣除背景。
 - `90000003` 中 1 帧候选目标星流量变化为 1.188%，超过 1% 门限，因此安全退回原图/零模型。
-- 已应用帧的 64 像素尺度背景位置散布下降 91.84%–94.12%，中位数 93.22%。
-- 已应用帧高频噪声比为 0.99801–1.00131，中位数 1.00015。
-- 最终掩膜占比为 18.69%–22.14%，中位数 20.10%。
-- 源掩膜边缘扣除后偏差绝对值不超过 8.03 DN。
+- 已应用帧的 64 像素尺度背景位置散布下降 92.13%–94.39%，中位数 93.30%。
+- 已应用帧最大高频噪声比为 1.00130。
+- 最终掩膜占比为 19.01%–22.14%，中位数 20.11%。
+- 源掩膜边缘扣除后偏差绝对值不超过 7.87 DN。
 - 80 个 SNR≥10 帧最终最大绝对孔径流量变化为 0.8222%。
 - 320 个输出 FITS 全部通过 Astropy 严格校验，科学头和 `FLK` 元数据均保留。
 - `background_subtracted = input - background_model` 的最大 float32 误差为 0。
-- Notebook 已执行，无错误单元；自动测试为 `8 passed`。
+- 全项目自动测试为 `22 passed`。
 
 `background_statistics.csv` 中的产品路径相对于 `data/processed/background/` 保存，不包含本机盘符或绝对路径。

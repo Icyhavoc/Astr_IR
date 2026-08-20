@@ -117,6 +117,14 @@ def test_quality_gate_returns_zero_model_when_improvement_requirement_is_impossi
     assert np.array_equal(result.background_subtracted, result.original)
 
 
+def test_high_snr_unverifiable_photometry_is_rejected():
+    image, _, _ = synthetic_image(with_star=False)
+    result = subtract_background(image, target={"snr": 100.0}, config=config())
+    assert not result.applied
+    assert result.status == "rejected_photometry_unverifiable"
+    assert np.count_nonzero(result.background_model) == 0
+
+
 def test_fits_outputs_preserve_header_and_float32_equation(tmp_path: Path):
     image, _, target = synthetic_image()
     input_path = tmp_path / "flicker_corrected_input.fits"
