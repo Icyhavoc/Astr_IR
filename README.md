@@ -1,6 +1,6 @@
 # Astr_IR 红外图像处理项目
 
-本项目包含一条可复现的二维红外 FITS 处理链：先校正逐行/列相关的 1/f 条纹噪声，再对条纹校正后的科学图估计并扣除二维背景。原始数据保持只读，所有派生产品统一写入 `data/processed/`。
+本项目包含一条可复现的红外 FITS 处理链：先校正逐行/列相关的 1/f 条纹噪声，再扣除二维背景，最后可并列使用二维 Noise2Noise 基线或三维 ASTERIS 时空 Transformer 进行自监督去噪和弱源检测评估。原始数据保持只读，所有派生产品统一写入 `data/processed/`。
 
 ## 处理链
 
@@ -18,6 +18,13 @@ data/processed/flicker/flicker_corrected_*.fits
                 │
                 ▼
 data/processed/background/background_subtracted_*.fits
+                │
+          ┌─────┴─────┐
+          ▼           ▼
+ Noise2Noise 2D    ASTERIS 3D
+          │           │
+          ▼           ▼
+noise2noise_denoised  asteris_denoised
 ```
 
 `flicker_model_*.fits` 只用于记录 1/f 模型，不会进入背景扣除；`processed_fits/Fixed_*` 也不作为任何流程输入。
@@ -28,16 +35,19 @@ data/processed/background/background_subtracted_*.fits
 data/raw/our_dataset/       原始 FITS、blindmap、测量表和原始说明文档
 data/processed/flicker/     1/f 校正产品与统计表（自动生成）
 data/processed/background/  背景扣除产品与统计表（自动生成）
+data/processed/noise2noise/  自监督模型、清单和去噪产品（自动生成）
+data/processed/asteris/      ASTERIS 清单、checkpoint、时空去噪产品（自动生成）
+data/processed/evaluation/   与模型解耦的伪源注入、盲检和科学评估（自动生成）
 src/astr_ir/                可安装的核心 Python 包
 scripts/                    批处理、Notebook 和任务文档构建入口
 notebooks/                  已执行的分析与验收 Notebook
-tests/                      两个流程的自动测试
+tests/                      各处理阶段、模型和通用科学评估的自动测试
 docs/                       算法、架构与任务说明
 figures/                    Notebook 生成的诊断图
 paper/、ppt/                现有论文与汇报材料（保留原位）
 ```
 
-更详细的职责边界见 [docs/architecture.md](docs/architecture.md)，算法说明见 [docs/flicker.md](docs/flicker.md) 与 [docs/background.md](docs/background.md)。
+更详细的职责边界见 [docs/architecture.md](docs/architecture.md)，算法说明见 [docs/flicker.md](docs/flicker.md)、[docs/background.md](docs/background.md)、[docs/noise2noise.md](docs/noise2noise.md)、[docs/asteris.md](docs/asteris.md) 与 [docs/source_evaluation.md](docs/source_evaluation.md)。
 
 ## 安装
 
@@ -65,14 +75,34 @@ python scripts/run_flicker.py --overwrite
 # 再运行二维背景扣除
 python scripts/run_background.py --overwrite
 
+# 构建清单、训练并完成全量推理
+python scripts/run_noise2noise.py --stage all --overwrite
+
+# ASTERIS 主代码在 notebook；CLI 可执行同一流程（先做 GPU smoke test）
+python scripts/run_asteris.py --stage prepare
+python scripts/run_asteris.py --stage train --epochs 1 --train-samples-per-epoch 2 --validation-samples 2 --f-maps 4 --device cuda
+python scripts/run_asteris.py --stage calibrate --model asteris4 --device cuda
+python scripts/run_asteris.py --stage all --model asteris4 --device cuda
+
+# 独立运行通用伪源盲检评估和绘图
+python scripts/run_source_evaluation.py --model noise2noise --device cuda
+python scripts/run_source_evaluation.py --model asteris --device cuda --model-output-root data/processed/asteris --evaluation-root data/processed/evaluation/asteris
+python scripts/plot_source_evaluation.py
+
 # 运行全部自动测试
 python -m pytest -q
 
 # 严格校验 640 个产品、目录清单、科学公式和局部质量门
 python scripts/validate_products.py
+
+# 严格校验 Noise2Noise 的 320 个 FITS、数据隔离和测试集科学门
+python scripts/validate_noise2noise.py
+
+# 严格校验伪源评估的数据隔离、一一匹配和指标
+python scripts/validate_source_evaluation.py
 ```
 
-快速冒烟检查可加 `--limit-per-sequence 1`。Notebook 位于 `notebooks/flicker/` 和 `notebooks/background/`；重建脚本位于 `scripts/build_*_notebook.py`。
+前两阶段快速冒烟检查可加 `--limit-per-sequence 1`。Noise2Noise 与 ASTERIS 都应先做小批量 GPU 冒烟训练。各流程的主 Notebook 位于 `notebooks/flicker/`、`notebooks/background/`、`notebooks/noise2noise/`、`notebooks/asteris/` 和 `notebooks/evaluation/`；重建脚本位于 `scripts/build_*_notebook.py`。
 
 ## 数据与 GitHub
 

@@ -33,6 +33,8 @@ data/processed/
 # Generated diagnostics
 figures/flicker_output/
 figures/background_output/
+figures/noise2noise_output/
+figures/evaluation_output/
 
 # Local logs and scratch files
 *.log

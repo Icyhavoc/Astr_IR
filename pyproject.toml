@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astr-ir"
-version = "0.1.0"
-description = "Reproducible 1/f stripe correction and background subtraction for RKZ50 infrared FITS images"
+version = "0.4.0"
+description = "Reproducible infrared FITS processing, self-supervised denoising, and blind source evaluation"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,6 +15,8 @@ dependencies = [
     "matplotlib>=3.8",
     "astropy>=6.0",
     "Pillow>=10.0",
+    "torch>=2.2",
+    "einops>=0.7",
 ]
 
 [project.optional-dependencies]
