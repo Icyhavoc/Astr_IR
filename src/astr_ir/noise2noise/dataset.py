@@ -11,7 +11,8 @@ import pandas as pd
 import torch
 from astropy.io import fits
 from PIL import Image
-from scipy.ndimage import shift
+from scipy.ndimage import gaussian_filter, shift
+from skimage.registration import phase_cross_correlation
 from torch.utils.data import Dataset
 
 
@@ -74,6 +75,41 @@ def _robust_linear_track(index: np.ndarray, values: np.ndarray, accepted: np.nda
     return fit_line(valid)
 
 
+def _registration_image(path: Path, downsample: int = 4) -> np.ndarray:
+    """Build a robust, high-pass thumbnail for source-independent registration."""
+
+    image = np.asarray(fits.getdata(path), dtype=np.float32)[::downsample, ::downsample]
+    finite = np.isfinite(image)
+    fill = float(np.nanmedian(image)) if np.any(finite) else 0.0
+    image = np.where(finite, image, fill)
+    highpass = image - gaussian_filter(image, sigma=6.0, mode="nearest")
+    center = float(np.median(highpass))
+    scale = float(1.4826 * np.median(np.abs(highpass - center)))
+    if np.isfinite(scale) and scale > 0:
+        highpass = np.clip(highpass, center - 6.0 * scale, center + 6.0 * scale)
+    taper = np.outer(np.hanning(highpass.shape[0]), np.hanning(highpass.shape[1])).astype(np.float32)
+    return ((highpass - center) * taper).astype(np.float32)
+
+
+def _phase_correlation_shifts(files: Sequence[Path], downsample: int = 4) -> np.ndarray:
+    """Estimate (dy, dx) shifts when the measurement table has no usable star track."""
+
+    reference = _registration_image(Path(files[0]), downsample=downsample)
+    shifts = []
+    for path in files:
+        moving = _registration_image(Path(path), downsample=downsample)
+        measured, error, _ = phase_cross_correlation(
+            reference, moving, upsample_factor=10, normalization=None
+        )
+        measured = np.asarray(measured, dtype=float) * float(downsample)
+        if not np.all(np.isfinite(measured)) or np.any(np.abs(measured) > 32.0) or not np.isfinite(error):
+            measured = np.zeros(2, dtype=float)
+        shifts.append(measured)
+    shifts = np.asarray(shifts, dtype=float)
+    shifts -= np.median(shifts, axis=0, keepdims=True)
+    return shifts
+
+
 def _split_labels(count: int) -> list[str]:
     if count < 24:
         raise ValueError("Noise2Noise splitting requires at least 24 frames per sequence")
@@ -124,9 +160,21 @@ def build_split_manifest(
         accepted = records["status"].astype(str).str.lower().eq("accepted").to_numpy()
         measured_x = records["xc"].to_numpy(float) - 1.0
         measured_y = records["yc"].to_numpy(float) - 1.0
-        track_x = _robust_linear_track(frame_index, measured_x, accepted)
-        track_y = _robust_linear_track(frame_index, measured_y, accepted)
-        reference_x, reference_y = float(np.median(track_x)), float(np.median(track_y))
+        has_measured_track = bool(
+            np.count_nonzero(np.isfinite(measured_x) & np.isfinite(measured_y)) >= 2
+        )
+        if has_measured_track:
+            track_x = _robust_linear_track(frame_index, measured_x, accepted)
+            track_y = _robust_linear_track(frame_index, measured_y, accepted)
+            reference_x, reference_y = float(np.median(track_x)), float(np.median(track_y))
+            alignment = np.column_stack((reference_y - track_y, reference_x - track_x))
+        else:
+            alignment = _phase_correlation_shifts(files)
+            with fits.open(files[0], memmap=False) as hdul:
+                first_shape = tuple(hdul[0].data.shape)
+            reference_x, reference_y = first_shape[1] / 2.0, first_shape[0] / 2.0
+            track_x = reference_x - alignment[:, 1]
+            track_y = reference_y - alignment[:, 0]
         for index, (path, split, (_, record)) in enumerate(zip(files, labels, records.iterrows())):
             with fits.open(path, memmap=False) as hdul:
                 header = hdul[0].header
@@ -153,12 +201,13 @@ def build_split_manifest(
                     "r_in": record.get("r_in"),
                     "r_out": record.get("r_out"),
                     "fwhm": record.get("fwhm"),
+                    "source_measurement_available": has_measured_track,
                     "track_x": float(track_x[index]),
                     "track_y": float(track_y[index]),
                     "reference_x": reference_x,
                     "reference_y": reference_y,
-                    "alignment_dx": float(reference_x - track_x[index]),
-                    "alignment_dy": float(reference_y - track_y[index]),
+                    "alignment_dx": float(alignment[index, 1]),
+                    "alignment_dy": float(alignment[index, 0]),
                     "flicker_applied": flicker_applied,
                     "background_applied": background_applied,
                     "upstream_applied": flicker_applied and background_applied,

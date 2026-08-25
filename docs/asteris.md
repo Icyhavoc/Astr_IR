@@ -1,5 +1,51 @@
 # ASTERIS 时空自监督去噪
 
+## 论文发布版 ASTERIS8 主实验
+
+当前用于 160 帧与 400 帧对比的主入口是
+`notebooks/asteris/02_asteris8_paper_160_vs_400.ipynb`，底层实现为
+`astr_ir.asteris.paper_pipeline`。后文的 `01_asteris_self_supervised.ipynb`、ASTERIS4、
+逐帧双向推理和 α 标定属于早期保守实验，不代表本次论文发布版结果。
+
+发布版流程使用：
+
+- 原作者 ASTERIS8 网络和 `ASTERIS8_nrcshort.pth` 初始化；
+- 16 张独立曝光随机抽样并交错为 8 帧 input / 8 帧 target；
+- 时间轴 3σ 与全 3D 3σ clipping、MSE 帧排序、全局 z-score、`/4 + 1`；
+- 两半独立中值居中、官方旋转/翻转与 input-target 交换；
+- `1e6 × (0.125 × SmoothL1(stack) + MSE(temporal mean))`；
+- AdamW，学习率 `1.5e-4`、weight decay `1e-4`，余弦 `T_max=2,000,000`；
+- 任意测试曝光先合并成 8 个时间 bin，全强度输出时间平均为一张科学共加图，不做 α 混合。
+
+RTX 4060 8 GB 无法实用运行 128×128 的全精度反向传播，因此网络前向使用 AMP；
+反向传播前只除去损失的公共 `1e6` 倍数以避免 float16 溢出。记录 loss 保持官方尺度，
+两项相对权重、AdamW 更新方向、模型和数据流程不变。
+
+400 张原始帧来自 5 个各 80 帧的序列。每个序列固定切为
+`44 train / 16 validation / 16 test / 4 guard`。160 profile 使用前两个序列，400 profile
+使用全部五个序列；主比较始终只在共同的 `90000002`、`90000003` 冻结测试曝光上进行。
+
+### 160 帧与 400 帧正式结果
+
+| 指标 | 160 帧 | 400 帧 | 400−160 |
+|---|---:|---:|---:|
+| 最佳 epoch | 19 | 9 | — |
+| 官方尺度 validation loss | 11727.5902 | 11656.1913 | -0.609% |
+| 共加噪声比中位数 | 0.347099 | 0.336831 | -0.010268 |
+| 噪声降低比例 | 65.29% | 66.32% | +1.03 个百分点 |
+| SNR 4 completeness | 0.8750 | 0.6875 | -0.1875 |
+| SNR 4 purity | 0.4667 | 0.4783 | +0.0116 |
+| SNR 4 F1 | 0.6087 | 0.5641 | -0.0446 |
+| SNR 5 completeness | 1.0000 | 1.0000 | 0 |
+| SNR 5 purity | 0.5000 | 0.5714 | +0.0714 |
+
+盲评估使用 2 个共同序列、4 次重复、6 个 SNR、每个 SNR 每个共加图 2 个源，共 96 个配对真源。
+每个源先注入全部独立测试曝光，再运行完整 ASTERIS8；固定检测阈值为 4σ。
+400 帧模型在两个序列上都进一步降低像素噪声，并把多数 SNR 下的假阳性从 16 个降到 12 个，
+但在 SNR 4 少检出 3/16 个源。因而增加到 400 帧带来更好的重建噪声和高 SNR 纯度，
+却未带来一致的临界弱源检测提升。完整表见
+`data/processed/evaluation/asteris_paper_comparison/comparison_report.md`。
+
 ## 实现边界
 
 ASTERIS 与 Noise2Noise 是并列模型，不共享网络结构。Noise2Noise 使用二维残差 DnCNN 逐帧推理；ASTERIS 使用原作者的 3D Restormer-style Transformer U-Net，同时建模时间和空间。主要可执行代码位于 `notebooks/asteris/01_asteris_self_supervised.ipynb`，Notebook 调用 `src/astr_ir/asteris/` 中可测试的底层组件。

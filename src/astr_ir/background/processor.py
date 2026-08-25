@@ -702,7 +702,7 @@ def run_batch(
     dataset_root: str | Path,
     output_root: str | Path,
     config: BackgroundConfig | None = None,
-    sequences: tuple[str, ...] = ("90000002", "90000003"),
+    sequences: tuple[str, ...] | None = None,
     overwrite: bool = False,
     limit_per_sequence: int | None = None,
 ) -> pd.DataFrame:
@@ -715,6 +715,14 @@ def run_batch(
     config.validate()
     detector_mask = load_detector_mask(dataset_root / "盲点表")
     table = load_measurement_table(dataset_root / "单帧检测总表_新方法.csv")
+    if sequences is None:
+        sequences = tuple(
+            path.name
+            for path in sorted(input_root.iterdir())
+            if path.is_dir() and any(path.glob("flicker_corrected_*.fits"))
+        )
+    if not sequences:
+        raise FileNotFoundError(f"No flicker-corrected sequence directories found under {input_root}")
     rows: list[dict] = []
     for sequence in sequences:
         files = discover_input_files(input_root, sequence)
@@ -737,7 +745,13 @@ def run_batch(
             rows.append(row)
     stats = pd.DataFrame(rows)
     output_root.mkdir(parents=True, exist_ok=True)
-    stats.to_csv(output_root / "background_statistics.csv", index=False, encoding="utf-8-sig")
+    stats_path = output_root / "background_statistics.csv"
+    if stats_path.exists():
+        existing = pd.read_csv(stats_path, encoding="utf-8-sig", dtype={"sequence": str})
+        existing = existing.loc[~existing["sequence"].astype(str).isin(map(str, sequences))]
+        stats = pd.concat([existing, stats], ignore_index=True)
+        stats = stats.sort_values(["sequence", "sequence_frame_index"]).reset_index(drop=True)
+    stats.to_csv(stats_path, index=False, encoding="utf-8-sig")
     return stats
 
 

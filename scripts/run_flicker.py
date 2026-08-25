@@ -17,6 +17,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-root", type=Path, default=PROJECT_ROOT / "data" / "raw" / "our_dataset")
     parser.add_argument("--output-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "flicker")
     parser.add_argument("--direction", choices=["auto", "row", "column"], default="auto")
+    parser.add_argument(
+        "--sequences",
+        nargs="+",
+        help="Sequence folders to process; default discovers every folder containing FITS files.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--limit-per-sequence", type=int)
     return parser.parse_args()
@@ -29,6 +34,7 @@ def main() -> None:
         args.dataset_root,
         args.output_root,
         config=config,
+        sequences=tuple(args.sequences) if args.sequences else None,
         overwrite=args.overwrite,
         limit_per_sequence=args.limit_per_sequence,
     )

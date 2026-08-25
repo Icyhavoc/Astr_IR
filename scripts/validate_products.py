@@ -172,6 +172,7 @@ def main() -> None:
         encoding="utf-8-sig",
         dtype={"sequence": str},
     )
+    raw_count = sum(1 for sequence in raw_root.iterdir() if sequence.is_dir() for _ in sequence.glob("*.fits"))
 
     flicker_error, background_error, fits_count = validate_equations(
         raw_root, flicker_root, background_root, flicker_stats, background_stats
@@ -182,6 +183,7 @@ def main() -> None:
     background_high_snr = background_stats[background_stats["input_snr"] >= 10]
 
     print("FITS/equations")
+    print(f"  raw frames discovered: {raw_count}")
     print(f"  strictly verified FITS: {fits_count}")
     print(f"  flicker equation max error: {flicker_error:g}")
     print(f"  background equation max error: {background_error:g}")
@@ -217,7 +219,14 @@ def main() -> None:
         for key, value in audit_local_profiles(flicker_stats).items():
             print(f"  {key}: {value}")
 
-    if fits_count != 640 or flicker_error != 0 or background_error != 0:
+    expected_products = 4 * raw_count
+    complete_statistics = len(flicker_stats) == raw_count and len(background_stats) == raw_count
+    if (
+        fits_count != expected_products
+        or not complete_statistics
+        or flicker_error != 0
+        or background_error != 0
+    ):
         raise RuntimeError("Product validation failed")
 
 

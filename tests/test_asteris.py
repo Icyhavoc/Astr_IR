@@ -15,6 +15,7 @@ from astr_ir.asteris.dataset import (
 )
 from astr_ir.asteris.inference import denoise_array
 from astr_ir.asteris.model import build_asteris_model
+from astr_ir.asteris.paper_pipeline import paper_asteris_loss, paper_sigma_clip, process_nmean
 from astr_ir.asteris.preprocessing import (
     build_noise_estimation_mask,
     circular_source_mask,
@@ -233,3 +234,35 @@ def test_gpu_smoke_asteris4():
 def test_config_enforces_model_temporal_depth():
     with pytest.raises(ValueError, match="patch_t=4"):
         AsterisConfig(model="asteris4", patch_t=8).validate()
+
+
+def test_paper_sigma_clip_removes_temporal_outlier_and_tracks_global_residual():
+    stack = np.ones((16, 8, 8), dtype=np.float32)
+    stack[:, 3, 3] = np.linspace(0.9, 1.1, 16)
+    stack[0, 3, 3] = 100.0
+    stack[:, 4, 4] = 50.0
+    valid = np.ones_like(stack, dtype=bool)
+    clipped, residual, clipped_valid, metrics = paper_sigma_clip(stack, valid)
+    assert not clipped_valid[0, 3, 3]
+    assert np.all(np.isfinite(clipped[clipped_valid]))
+    assert metrics["temporal_clipped_fraction"] > 0
+    assert residual.shape == stack.shape
+
+
+def test_process_nmean_builds_eight_independent_bins():
+    stack = np.arange(16, dtype=np.float32)[:, None, None]
+    valid = np.ones_like(stack, dtype=bool)
+    output, mask = process_nmean(stack, valid, nmean=8)
+    assert output.shape == (8, 1, 1)
+    assert np.allclose(output[:, 0, 0], np.arange(0.5, 16.0, 2.0))
+    assert mask.all()
+
+
+def test_paper_loss_uses_released_stack_weight():
+    prediction = torch.ones((1, 1, 8, 2, 2))
+    target = torch.full_like(prediction, 2.0)
+    mask = torch.ones_like(prediction)
+    total, stack_l1, mean_l2 = paper_asteris_loss(prediction, target, mask)
+    assert torch.isclose(stack_l1, torch.tensor(500_000.0))
+    assert torch.isclose(mean_l2, torch.tensor(1_000_000.0))
+    assert torch.isclose(total, torch.tensor(1_062_500.0))

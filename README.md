@@ -5,7 +5,7 @@
 ## 处理链
 
 ```text
-data/raw/our_dataset/9000000{2,3}/*.fits
+data/raw/our_dataset/{90000002,90000003,90000004,90000005_1,90000005_2}/*.fits
                 │
                 ▼
       astr_ir.flicker.processor
@@ -37,6 +37,7 @@ data/processed/flicker/     1/f 校正产品与统计表（自动生成）
 data/processed/background/  背景扣除产品与统计表（自动生成）
 data/processed/noise2noise/  自监督模型、清单和去噪产品（自动生成）
 data/processed/asteris/      ASTERIS 清单、checkpoint、时空去噪产品（自动生成）
+data/processed/asteris_paper_{160,400}/  论文发布版 ASTERIS8 对比实验
 data/processed/evaluation/   与模型解耦的伪源注入、盲检和科学评估（自动生成）
 src/astr_ir/                可安装的核心 Python 包
 scripts/                    批处理、Notebook 和任务文档构建入口
@@ -84,6 +85,16 @@ python scripts/run_asteris.py --stage train --epochs 1 --train-samples-per-epoch
 python scripts/run_asteris.py --stage calibrate --model asteris4 --device cuda
 python scripts/run_asteris.py --stage all --model asteris4 --device cuda
 
+# 论文发布版 ASTERIS8：160/400 帧训练、共同测试推理和配对评估
+python scripts/run_asteris_paper.py --profile 160 --stage all --device cuda --overwrite
+python scripts/run_asteris_paper.py --profile 400 --stage all --device cuda --overwrite
+python scripts/run_asteris_paper_evaluation.py --profile 160 --device cuda
+python scripts/run_asteris_paper_evaluation.py --profile 400 --device cuda
+python scripts/compare_asteris_paper_profiles.py
+
+# 用原始 RA/DE 指向完成 WCS，查询 2MASS/Gaia，并标注真实弱源
+python scripts/annotate_asteris_paper_catalog.py
+
 # 独立运行通用伪源盲检评估和绘图
 python scripts/run_source_evaluation.py --model noise2noise --device cuda
 python scripts/run_source_evaluation.py --model asteris --device cuda --model-output-root data/processed/asteris --evaluation-root data/processed/evaluation/asteris
@@ -92,7 +103,7 @@ python scripts/plot_source_evaluation.py
 # 运行全部自动测试
 python -m pytest -q
 
-# 严格校验 640 个产品、目录清单、科学公式和局部质量门
+# 按当前原始帧数动态校验全部产品、目录清单、科学公式和局部质量门
 python scripts/validate_products.py
 
 # 严格校验 Noise2Noise 的 320 个 FITS、数据隔离和测试集科学门
