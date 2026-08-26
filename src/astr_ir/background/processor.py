@@ -455,6 +455,8 @@ def subtract_background(
     detector_mask: np.ndarray | None = None,
     target: Mapping | None = None,
     config: BackgroundConfig | None = None,
+    *,
+    image_source_mask: np.ndarray | None = None,
 ) -> BackgroundResult:
     target = None  # Catalog/measurement coordinates must not affect the science path.
     config = config or BackgroundConfig()
@@ -469,10 +471,13 @@ def subtract_background(
     edge = make_edge_mask(original.shape, config.edge_width)
     known = np.zeros_like(original, dtype=bool)
     base = detector | edge | invalid
+    automatic = np.zeros_like(base) if image_source_mask is None else np.asarray(image_source_mask,bool)
+    if automatic.shape != original.shape:
+        raise ValueError('Image-derived source mask shape mismatch')
 
     rough, _ = estimate_grid_background(
         original,
-        base | known,
+        base | automatic,
         config.rough_box_size,
         config.rough_filter_size,
         config.rough_sigma_clip,
@@ -481,13 +486,13 @@ def subtract_background(
     ring_background, bright, detection_scale = estimate_clipped_ring_background(
         original,
         rough,
-        base | known,
+        base | automatic,
         config.ring_inner_radius,
         config.ring_width,
         config.bright_sigma,
     )
     detection_residual = original - ring_background
-    initial_source = known | binary_dilation(bright, structure=_disk(2))
+    initial_source = automatic | binary_dilation(bright, structure=_disk(2))
     source, tiers = make_tiered_source_mask(detection_residual, base, initial_source, config)
     combined = base | source
     candidate_model, _ = estimate_grid_background(
@@ -566,6 +571,7 @@ def subtract_background(
         "mask_fraction": float(np.mean(combined)),
         "detector_mask_fraction": float(np.mean(detector)),
         "source_mask_fraction": float(np.mean(source)),
+        "coadd_source_mask_fraction": float(np.mean(automatic)),
         "edge_mask_fraction": float(np.mean(edge)),
         "detection_residual_rstd": detection_scale,
         "background_median": float(np.median(model[np.isfinite(model)])),

@@ -60,7 +60,13 @@ def fit_gaussian_pixels(cut, mask):
 
 def inspect_frame(path, detector):
     image, header = load_fits(path)
-    valid = science_valid(path, image, detector) & ~make_edge_mask(image.shape, 24)
+    return inspect_array(image,science_valid(path,image,detector),header)
+
+
+def inspect_array(image, valid, header=None):
+    """The same image-only feature extraction for read-only in-memory trials."""
+    image=np.asarray(image,float)
+    valid = np.asarray(valid,bool) & np.isfinite(image) & ~make_edge_mask(image.shape, 24)
     smooth = masked_gaussian(image, valid, 16)
     highpass = np.where(valid, image - smooth, 0)
     feature = masked_gaussian(highpass, valid, 1.3)
@@ -92,7 +98,7 @@ def inspect_frame(path, detector):
     feature *= np.outer(np.hanning(image.shape[0]), np.hanning(image.shape[1]))
     sigma = neighbor_difference_noise(image, ~valid)
     if not np.isfinite(sigma) or sigma <= 0 or np.count_nonzero(feature) < 20:
-        raise ValueError(f"Insufficient blind registration/noise information: {path}")
+        raise ValueError("Insufficient blind registration/noise information")
     return image, valid, header, feature, stars, sigma
 
 
@@ -159,7 +165,7 @@ def gaussian_psf(sigma, fraction=(0,0)):
     return kernel/kernel.sum()
 
 
-def exposure_statistic(image, valid, noise, psf_sigma, offset=(0,0), throughput=1, *, fit_local_background=True):
+def exposure_statistic(image, valid, noise, psf_sigma, offset=(0,0), throughput=1, *, fit_local_background=True, psf_kernel=None):
     """Evaluate a shifted PSF on native pixels, without resampling noisy data.
 
     Numerator=sum(F*P*I/V); information=sum(F²*P²/V). By default a
@@ -170,7 +176,16 @@ def exposure_statistic(image, valid, noise, psf_sigma, offset=(0,0), throughput=
     Preprocessing-induced/temporal correlations still require empirical checks.
     """
     integer = np.floor(offset).astype(int)
-    kernel = gaussian_psf(psf_sigma, np.asarray(offset)-integer)
+    fraction=np.asarray(offset)-integer
+    if psf_kernel is None:
+        kernel = gaussian_psf(psf_sigma, fraction)
+    else:
+        from .weak_detection import shifted_kernel
+        kernel = shifted_kernel(psf_kernel,-fraction[0],-fraction[1])
+    noise=np.asarray(noise,float)
+    if not np.isfinite(noise).all() or np.any(noise<=0):
+        raise ValueError('Noise must be positive and finite')
+    valid=np.asarray(valid,bool) & np.isfinite(image)
     center = np.median(image[valid])
     ivar = valid.astype(float)/noise**2
     n = throughput*fftconvolve(np.where(valid, image-center, 0)*ivar, kernel[::-1,::-1], mode="same")

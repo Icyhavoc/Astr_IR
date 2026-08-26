@@ -34,6 +34,9 @@ figures/      N2N/论文版历史结果图；过时预处理图已归档
 真实弱源人工核验：运行 [全盲评估 Notebook](notebooks/evaluation/02_blind_pre_asteris_pipeline.ipynb) 第 5 节，
 将已有星表位置标在处理后图像上；输出见 `figures/catalog_validation_output/`，不参与处理或训练。
 
+弱源检出改进实验在同一 Notebook 第 6 节：逐阶段随机注入、两轮全盲背景、PSF 选择与残差再检测、局部噪声校准。
+全部运行开关默认关闭，不训练、不覆盖旧结果；使用方法及未验证边界见 [V3 说明](docs/evaluation/weak_source_v3.md)。
+
 ## 安装与检查
 
 在 `code` 目录使用 Python 3.11 或 3.12：

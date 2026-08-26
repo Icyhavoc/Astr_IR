@@ -19,6 +19,7 @@ from matplotlib.colors import PowerNorm
 from matplotlib.patches import Circle
 import numpy as np
 import pandas as pd
+from scipy import ndimage
 
 from .blind_joint import inspect_frame, register_features
 
@@ -91,6 +92,45 @@ def _normalization(image, score=False):
     return PowerNorm(gamma=0.5, vmin=float(lo), vmax=float(max(hi, lo+1e-6)), clip=True)
 
 
+def _display_cmap():
+    """Opaque neutral gray for missing data, independent of the figure background."""
+    cmap = plt.get_cmap('gray').copy()
+    cmap.set_bad('#808080', alpha=1.0)
+    return cmap
+
+
+def interpolate_display_holes(image, *, max_hole_pixels=16):
+    """Return a cosmetic COPY and fill mask; never infer values from the catalog.
+
+Only enclosed, 8-connected invalid components of at most max_hole_pixels are
+eligible. Values come from Gaussian-weighted ORIGINAL valid neighbors within
+three pixels (sigma=1); filled pixels never become support for another fill.
+Valid science pixels, large gaps and components touching an edge are unchanged.
+The result is not suitable for measurement, detection or model input.
+"""
+    if not isinstance(max_hole_pixels, (int, np.integer)) or max_hole_pixels < 1:
+        raise ValueError('max_hole_pixels must be a positive integer')
+    original = np.asarray(image, dtype=float)
+    if original.ndim != 2:
+        raise ValueError('Expected a 2-D display image')
+    result = original.copy()
+    valid = np.isfinite(original)
+    result[~valid] = np.nan
+    labels, count = ndimage.label(~valid, structure=np.ones((3,3), dtype=bool))
+    sizes = np.bincount(labels.ravel(), minlength=count+1)
+    eligible = (sizes > 0) & (sizes <= max_hole_pixels)
+    eligible[0] = False
+    boundary = np.unique(np.concatenate((labels[0], labels[-1], labels[:,0], labels[:,-1])))
+    eligible[boundary] = False
+    fill = eligible[labels]
+    if fill.any():
+        support = ndimage.gaussian_filter(valid.astype(float), sigma=1, radius=3, mode='constant', cval=0)
+        numerator = ndimage.gaussian_filter(np.where(valid,original,0), sigma=1, radius=3, mode='constant', cval=0)
+        fill &= support > 1e-8
+        result[fill] = numerator[fill]/support[fill]
+    return result, fill
+
+
 def _mark(ax, row, radius, label=False):
     x, y = row.x_plot, row.y_plot
     color = '#00e5ff' if row.valid_at_position else '#ffad42'
@@ -100,24 +140,31 @@ def _mark(ax, row, radius, label=False):
                     color=color, fontsize=9, weight='bold', clip_on=True)
 
 
-def _overview(image, positions, title, path, *, score, dpi):
+def _overview(image, positions, title, path, *, score, dpi, display_image=None):
+    interpolated = display_image is not None
+    shown = image if display_image is None else display_image
     fig, ax = plt.subplots(figsize=(9,8.7), layout='constrained')
-    artist = ax.imshow(image, origin='lower', cmap='gray', interpolation='nearest', norm=_normalization(image,score))
+    artist = ax.imshow(np.ma.masked_invalid(shown), origin='lower', cmap=_display_cmap(),
+                       interpolation='nearest', norm=_normalization(image,score))
     for row in positions.loc[positions.in_frame].itertuples():
         _mark(ax,row,9,label=True)
-    ax.set(title=title, xlabel='x [pixel, zero-based]', ylabel='y [pixel, zero-based]')
+    mode = 'DISPLAY-ONLY INTERPOLATED' if interpolated else 'MASKED: invalid pixels gray'
+    ax.set(title=f'{title}\n{mode}', xlabel='x [pixel, zero-based]', ylabel='y [pixel, zero-based]')
     fig.colorbar(artist, ax=ax, fraction=0.04, label='Empirical score (not calibrated sigma)' if score else 'DN (sqrt display)')
-    fig.supxlabel('Catalog positions, NOT detections | cyan: valid pixel; orange: invalid pixel\n'
-                  'Display only; no peak snapping or source protection. Each image has its own stretch.', fontsize=9)
+    note = ('Small holes filled for display, NOT measurements; remaining gaps gray.' if interpolated
+            else 'Gray = DQ DO_NOT_USE / non-finite; no detector-mask overlay or interpolation.')
+    fig.supxlabel('Catalog positions, NOT detections | cyan/orange: ORIGINAL pixel valid/invalid\n'
+                  f'{note}\nStretch from original valid data; no peak snapping or source protection.', fontsize=8)
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
 
 
-def _cutout_page(products, positions, labels, sequence, path, *, half, dpi):
+def _cutout_page(products, positions, labels, sequence, path, *, half, dpi, interpolated=False):
     fig, axes = plt.subplots(len(labels),len(products), figsize=(12,2.65*len(labels)+0.8), squeeze=False, layout='constrained')
     for column, (key, product) in enumerate(products.items()):
         table = positions[key].set_index('weak_label')
         image = product['image']
+        shown = product['display_image'] if interpolated else image
         h,w = image.shape
         for index,label in enumerate(labels):
             ax = axes[index,column]
@@ -128,7 +175,8 @@ def _cutout_page(products, positions, labels, sequence, path, *, half, dpi):
                 x,y = int(round(row.x_plot)), int(round(row.y_plot))
                 xlo,xhi,ylo,yhi = max(0,x-half),min(w,x+half+1),max(0,y-half),min(h,y+half+1)
                 cut = image[ylo:yhi,xlo:xhi]
-                ax.imshow(cut, origin='lower', cmap='gray', interpolation='nearest',
+                ax.imshow(np.ma.masked_invalid(shown[ylo:yhi,xlo:xhi]), origin='lower',
+                          cmap=_display_cmap(), interpolation='nearest',
                           extent=(xlo-.5,xhi-.5,ylo-.5,yhi-.5), norm=_normalization(cut,product['score']))
                 _mark(ax,row,6)
                 # Keep exact subpixel predicted coordinate, not the rounded crop center.
@@ -138,9 +186,12 @@ def _cutout_page(products, positions, labels, sequence, path, *, half, dpi):
                 ax.set_title(product['short_title'],fontsize=10)
             if column == 0:
                 ax.set_ylabel(f'{label}\nK={row.k_m:.2f}',fontsize=10)
-    fig.suptitle(f'{sequence} | real catalog positions: {labels[0]} - {labels[-1]}',fontsize=13)
+    mode = 'DISPLAY-ONLY INTERPOLATED' if interpolated else 'MASKED: invalid pixels gray'
+    fig.suptitle(f'{sequence} | real catalog positions: {labels[0]} - {labels[-1]}\n{mode}',fontsize=12)
     fig.supxlabel('Fixed catalog sample; not a completeness test. Unequal exposures / preprocessing.\n'
-                  'Independent cutout stretches: compare locations, not brightness or SNR.',fontsize=9)
+                  'Original-valid-data stretches; cyan/orange: ORIGINAL pixel valid/invalid.\n'
+                  + ('Filled holes are cosmetic, NOT detections or measurements; remaining gaps gray.' if interpolated
+                     else 'Gray = invalid data; compare locations, not brightness or SNR.'),fontsize=8)
     fig.savefig(path,dpi=dpi)
     plt.close(fig)
 
@@ -153,31 +204,53 @@ def _sha256(path):
 def _render_worker(payload):
     """Draw in a clean CPU process; avoid torch/Conda OpenMP collisions."""
     destination = Path(payload['destination'])
-    products,positions,paths_out = {},{},{}
+    products,positions,mask_statistics = {},{},{}
     for key,product in payload['products'].items():
         image,_ = read_display_image(product['path'])
         products[key] = dict(product,image=image)
         positions[key] = pd.DataFrame(payload['positions'][key])
-        path = destination/f"{payload['sequence']}_{key}_catalog_overlay.png"
-        _overview(image,positions[key],f"{payload['sequence']} | {product['short_title']}",path,
-                  score=product['score'],dpi=payload['dpi'])
-        paths_out[key] = str(path)
-    cutouts = []
-    labels = payload['labels']
-    for start in range(0,len(labels),4):
-        path = destination/f"{payload['sequence']}_weak_source_cutouts_{start//4+1:02d}.png"
-        _cutout_page(products,positions,labels[start:start+4],payload['sequence'],path,
-                     half=payload['half'],dpi=payload['dpi'])
-        cutouts.append(str(path))
-    return paths_out,cutouts
+        filled_count = 0
+        if payload['export_interpolated']:
+            display_image,fill = interpolate_display_holes(image,max_hole_pixels=payload['max_hole_pixels'])
+            products[key]['display_image'] = display_image
+            filled_count = int(fill.sum())
+        with fits.open(product['path'],memmap=False) as hdul:
+            has_dq = 'DQ' in hdul
+        invalid_count = int((~np.isfinite(image)).sum())
+        mask_statistics[key] = dict(has_dq=has_dq,invalid_pixels=invalid_count,
+                                   display_filled_pixels=filled_count,remaining_invalid_pixels=invalid_count-filled_count)
+    variants = {}
+    for mode in ('masked','display_interpolated') if payload['export_interpolated'] else ('masked',):
+        interpolated = mode == 'display_interpolated'
+        folder = destination/mode if interpolated else destination
+        folder.mkdir(parents=True,exist_ok=True)
+        paths_out,cutouts = {},[]
+        for key,product in products.items():
+            path = folder/f"{payload['sequence']}_{key}_catalog_overlay.png"
+            _overview(product['image'],positions[key],f"{payload['sequence']} | {product['short_title']}",path,
+                      score=product['score'],dpi=payload['dpi'],
+                      display_image=product.get('display_image') if interpolated else None)
+            paths_out[key] = str(path)
+        labels = payload['labels']
+        for start in range(0,len(labels),4):
+            path = folder/f"{payload['sequence']}_weak_source_cutouts_{start//4+1:02d}.png"
+            _cutout_page(products,positions,labels[start:start+4],payload['sequence'],path,
+                         half=payload['half'],dpi=payload['dpi'],interpolated=interpolated)
+            cutouts.append(str(path))
+        variants[mode] = dict(overlays=paths_out,cutouts=cutouts)
+    return dict(variants=variants,mask_statistics=mask_statistics)
 
 
 def export_catalog_validation(project_root, *, sequences=('90000002','90000003'),
-                              output_dir=None, dpi=160, cutout_half_size=24):
+                              output_dir=None, dpi=160, cutout_half_size=24,
+                              export_interpolated=True, max_hole_pixels=16):
     """Export frozen-catalog overlays, cutout pages and provenance; offline only.
 
 Repeated calls replace only this exporter’s files under figures. A missing or
 stale calibration fails explicitly; it never queries catalogs or trains a model.
+Gray-masked figures are always exported. Optional cosmetic copies in the
+display_interpolated/ subfolder are labeled and NEVER used for validity flags,
+stretch estimates, registration or any science calculation.
 """
     root = Path(project_root).resolve()
     output = Path(output_dir).resolve() if output_dir is not None else root/'figures/catalog_validation_output'
@@ -185,6 +258,8 @@ stale calibration fails explicitly; it never queries catalogs or trains a model.
         raise ValueError('Visualization output must be inside project figures/')
     if dpi < 50 or cutout_half_size < 8:
         raise ValueError('dpi >= 50 and cutout_half_size >= 8 required')
+    if not isinstance(max_hole_pixels, (int, np.integer)) or max_hole_pixels < 1:
+        raise ValueError('max_hole_pixels must be a positive integer')
     processed = root/'data/processed'
     records = []
     for sequence in sequences:
@@ -249,6 +324,7 @@ stale calibration fails explicitly; it never queries catalogs or trains a model.
             positions[key] = transfer_positions(table,product['offset'],product['image'])
             tables.append(positions[key].assign(product=key,science_path=str(product['path'])))
         payload = dict(sequence=sequence,destination=str(destination),dpi=dpi,half=cutout_half_size,
+            export_interpolated=bool(export_interpolated),max_hole_pixels=int(max_hole_pixels),
             labels=table.weak_label.tolist(),
             products={key:dict(path=str(p['path']),score=p['score'],short_title=p['short_title']) for key,p in products.items()},
             positions={key:t[['weak_label','x_plot','y_plot','in_frame','valid_at_position','k_m']].to_dict('records') for key,t in positions.items()})
@@ -260,7 +336,9 @@ stale calibration fails explicitly; it never queries catalogs or trains a model.
         environment['PYTHONDONTWRITEBYTECODE'] = '1'
         worker = subprocess.run([sys.executable,'-m','astr_ir.evaluation.catalog_visualization','--render-worker'],
             input=json.dumps(payload),text=True,encoding='utf-8',capture_output=True,check=True,timeout=180,env=environment)
-        paths_out,cutouts = json.loads(worker.stdout)
+        rendering = json.loads(worker.stdout)
+        masked = rendering['variants']['masked']
+        paths_out,cutouts = masked['overlays'],masked['cutouts']
         pd.concat(tables,ignore_index=True).to_csv(destination/'plotted_positions.csv',index=False,encoding='utf-8-sig')
         inputs = [table_path,solution_path,old_reference,*[p['path'] for p in products.values()]]
         report = dict(sequence=sequence,weak_sources=len(table),registration=diagnostic,
@@ -269,11 +347,18 @@ stale calibration fails explicitly; it never queries catalogs or trains a model.
                       catalog_role='display only; no processing, detection, training or weak-source reselection',
                       selection_caveat='Frozen historical sample used input peak SNR / K cuts; not a complete or unbiased catalog sample.',
                       comparison_caveat='Current coadd/score and old ASTERIS use different exposure counts and preprocessing; no performance claim.',
+                      mask_rule='DQ bit 0 (DO_NOT_USE) or non-finite; keep valid partial coverage. Without DQ, non-finite only; finite unflagged defects cannot be identified here. Never overlay a native detector blindmap on coadds.',
+                      interpolation=dict(enabled=bool(export_interpolated),max_hole_pixels=int(max_hole_pixels),
+                          rule='Display copy only: enclosed 8-connected holes; Gaussian-weighted original valid neighbors, sigma=1, radius=3; valid pixels unchanged. No catalog input.',
+                          normalization='Both variants use identical stretches from ORIGINAL valid pixels; positions/validity flags unchanged.'),
+                      mask_statistics=rendering['mask_statistics'],display_variants=rendering['variants'],
                       sources_sha256={str(p):_sha256(p) for p in inputs},overlays=paths_out,cutouts=cutouts)
         (destination/'visualization_metadata.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
         records.append(dict(sequence=sequence,weak_sources=len(table),matched_stars=diagnostic['matched_stars'],
                             transfer_rms_pix=diagnostic['registration_rms_2d_pix'],
-                            original_wcs_rms_pix=solution['anchor_rms_pix'],**paths_out,cutouts=cutouts))
+                            original_wcs_rms_pix=solution['anchor_rms_pix'],**paths_out,cutouts=cutouts,
+                            display_interpolated=rendering['variants'].get('display_interpolated'),
+                            mask_statistics=rendering['mask_statistics']))
     return records
 
 

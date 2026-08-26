@@ -1,5 +1,8 @@
 # Blind pre-ASTERIS pipeline, 2026-08-26
 
+V3 weak-source experiments are now implemented in notebook section 6; see [implementation and boundaries](weak_source_v3.md).
+All new run switches default to false. The historical results below were not rerun or overwritten by this code update.
+
 Main notebook: `notebooks/evaluation/02_blind_pre_asteris_pipeline.ipynb`.
 
 Section 5 now provides an independent, offline catalog-position visualization of the frozen products.
@@ -7,6 +10,10 @@ It reads the previously saved 12 weak-source labels for each of 90000002 and 900
 Automatic image stars transfer the historical catalog grid into the current first-exposure grid; weak-source positions are never snapped to peaks or reselected.
 Outputs are PNG/CSV/JSON in `figures/catalog_validation_output/`, with separate exposure/preprocessing labels and registration diagnostics.
 This display-only module does not change any science data or the catalog-free processing described below.
+Invalid pixels (coadd DQ DO_NOT_USE or non-finite values) are opaque neutral gray; native detector masks are not overlaid on coadds.
+Optional `display_interpolated/` copies fill only small enclosed holes from original valid neighbors, without altering valid pixels, display stretches or catalog-position validity flags.
+These labeled cosmetic copies must not be used for detection or photometry; large/boundary gaps remain gray, and no FITS is rewritten.
+Legacy products without DQ mask only non-finite pixels, not unflagged finite defects.
 
 ## Results and limitations of this run
 

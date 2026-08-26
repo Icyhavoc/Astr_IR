@@ -86,3 +86,17 @@ def test_catalog_visualization_cells_match_builder():
     cells = [c for c in notebook.cells if c.id.startswith('catalog-validation-')]
     assert len(cells) == 3
     assert all(c.source.strip() in templates for c in cells)
+
+
+def test_weak_source_cells_match_builder_and_never_run_by_default():
+    builder=ast.parse((ROOT/'scripts/notebooks/build_blind_pipeline_notebook.py').read_text(encoding='utf-8'))
+    templates=[ast.literal_eval(n.value.args[0]).strip() for n in builder.body
+        if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Name)
+        and n.value.func.id in {'md','code'}]
+    notebook=nbformat.read(ROOT/'notebooks/evaluation/02_blind_pre_asteris_pipeline.ipynb',as_version=4)
+    cells=[c for c in notebook.cells if c.id.startswith('weak-source-v3-')]
+    assert len(cells)==2 and all(c.source.strip() in templates for c in cells)
+    source=next(c.source for c in cells if c.cell_type=='code')
+    switches=[n for n in ast.parse(source).body if isinstance(n,ast.Assign)
+        and any(isinstance(t,ast.Name) and t.id.startswith('RUN_') for t in n.targets)]
+    assert len(switches)==3 and all(ast.literal_eval(n.value) is False for n in switches)

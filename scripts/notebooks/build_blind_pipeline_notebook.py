@@ -138,6 +138,12 @@ md("""
 精确绘图坐标 CSV 和校验/来源 JSON。青色圆圈是星表预测位置，橙色表示该位置像元无效，**不是检出标志**。
 坐标为零基，显示采用 origin=lower；圆圈半径只是视觉标记，不是天体测量误差。
 
+**盲元显示：**默认将共加图自身 DQ 的 DO_NOT_USE 和非有限值显示为不透明中性灰；
+不直接叠加原始探测器盲元表，仍有效的部分覆盖像元保留。旧 FITS 没有 DQ 时仅屏蔽非有限值，不能把亮点自动判成盲元。
+另在 `display_interpolated/` 输出 7 张标明 DISPLAY-ONLY INTERPOLATED 的展示副本：
+只用原有效邻域插值不超过 16 像素的封闭缺口，大缺口和边界仍为灰色；不改任何有效像元。
+两种版本使用相同的原有效像元拉伸和坐标有效性标记。填补值不是观测，不可用于检出或测光，也不回写 FITS。
+
 **解释边界：**这是固定的历史弱源样本（原先按旧输入的峰值 SNR / K 等条件选取），不是完备星表或无偏检测测试。
 当前共加/检测图使用 80 帧，旧论文版共加使用 16 帧且预处理不同；各图/局部使用独立显示拉伸，
 不能通过亮暗或平滑程度直接宣称模型性能提高。已有 WCS 误差与新平移残差会分别记录。
@@ -161,6 +167,7 @@ CATALOG_FIGURE_ROOT = CATALOG_PROJECT_ROOT / "figures" / "catalog_validation_out
 catalog_visualizations = export_catalog_validation(
     CATALOG_PROJECT_ROOT, sequences=CATALOG_SEQUENCES,
     output_dir=CATALOG_FIGURE_ROOT, dpi=160, cutout_half_size=24,
+    export_interpolated=True, max_hole_pixels=16,  # 仅生成展示副本，不修改科学数据
 )
 display(pd.DataFrame(catalog_visualizations)[[
     "sequence", "weak_sources", "matched_stars", "transfer_rms_pix", "original_wcs_rms_pix"
@@ -169,13 +176,189 @@ print("标注图和逐源坐标已保存至:", CATALOG_FIGURE_ROOT)
 for result in catalog_visualizations:
     print(result["sequence"], "完整图:", result["weighted_coadd"])
     print("局部放大图:", *result["cutouts"], sep="\\n")
+    if result["display_interpolated"] is not None:
+        print("仅显示用插值版:", result["display_interpolated"]["overlays"]["weighted_coadd"])
 """)
 code("""
 # 可切换到 "90000003"；文件夹中还包含 joint_score 和两个 ASTERIS 结果。
 SHOW_SEQUENCE = "90000002"
+SHOW_INTERPOLATED = False  # 默认严谨的灰色掩膜版；True 仅切换到展示副本
 selected = next(item for item in catalog_visualizations if item["sequence"] == SHOW_SEQUENCE)
-display(DisplayImage(filename=selected["weighted_coadd"], width=1000))
-display(DisplayImage(filename=selected["cutouts"][0], width=1100))
+if SHOW_INTERPOLATED:
+    if selected["display_interpolated"] is None:
+        raise ValueError("请先设置 export_interpolated=True 并运行上一单元")
+    shown_overlays = selected["display_interpolated"]["overlays"]
+    shown_cutouts = selected["display_interpolated"]["cutouts"]
+    print("仅显示用插值版：填补像元不是观测，不用于检出或测光。")
+else:
+    shown_overlays, shown_cutouts = selected, selected["cutouts"]
+    print("灰色掩膜版：无效像元为灰色，没有填补。")
+display(DisplayImage(filename=shown_overlays["weighted_coadd"], width=1000))
+display(DisplayImage(filename=shown_cutouts[0], width=1100))
+""")
+
+md("""
+## 6. 弱源检出改进实验（未训练；全部运行开关默认关闭）
+
+先在冻结的 validation 曝光上做逐阶段随机注入，比较 32/64 网格与 1/3/5 滤波。
+模拟源从原始曝光副本注入，经历 raw → flicker → 单轮/两轮 background → 盲检测；
+未显式提供 checkpoint 时 ASTERIS 阶段跳过，不加载权重、不训练。
+仅读取 manifest 的文件名、序列、帧号和 split，不使用历史目标坐标或 SNR。
+
+两轮背景将粗处理共加图中自动发现的源投影回单帧，第二轮重新拟合原 flicker 输入。
+V3 检测比较圆高斯、椭圆高斯、Moffat 和经验 PSF，采用局部噪声、原曝光联合拟合和最多三轮残差检测。
+星数不足时明确回退；大源组改用稀疏联合拟合，真正退化或非正通量仍标记。白化保持关闭，输出相关性诊断。
+
+所有实验写入新目录，已有输出时拒绝覆盖。主流程仍为 flicker → background → N2N 或 ASTERIS，V3 是评估支路。
+下方 validation 小样本命令只是入口，不会因打开 Notebook 而运行。
+`source_recovery.csv` 的配对通量响应用于定位信号损失，不等于检出；真实星场的新增未匹配峰不能直接算作假源。
+固定误报预算需先用独立无源模拟的峰值分数调用 `select_threshold_from_null` 冻结阈值，再用独立 test 帧/随机种子验证。
+星表仍只在结果冻结后供人眼核验，不作为参数筛选目标。第 1–5 节仍展示历史结果，不代表 V3 已重跑。
+""")
+code("""
+from pathlib import Path
+import sys, subprocess
+start = Path.cwd().resolve()
+WEAK_ROOT = next(p for p in (start, *start.parents) if (p / "src" / "astr_ir").is_dir())
+EXPERIMENT_ROOT = WEAK_ROOT / "data" / "processed" / "weak_source_v3_trial01"
+FROZEN_SPLIT = WEAK_ROOT / "data" / "processed" / "asteris_paper_400" / "manifests" / "split_manifest.csv"
+WEAK_SEQUENCE = "90000002"
+RUN_STAGE_RECOVERY = False
+RUN_TWO_PASS_BACKGROUND = False
+RUN_V3_DETECTION = False
+# 每次实验使用新的 EXPERIMENT_ROOT；不能借 --overwrite 覆盖旧科学结果。
+# 正式 test 验证要另设目录、独立 seed，且不要依据星表位置挑选参数。
+if RUN_STAGE_RECOVERY:
+    subprocess.run([sys.executable, str(WEAK_ROOT / "scripts/evaluation/run_stage_recovery.py"),
+        "--split-manifest", str(FROZEN_SPLIT), "--sequence", WEAK_SEQUENCE,
+        "--phase", "validation", "--limit", "8", "--sources", "4", "--repeats", "1",
+        "--fluxes", "6000", "12000", "--ablation",
+        "--output-root", str(EXPERIMENT_ROOT / "recovery_validation")], cwd=WEAK_ROOT, check=True)
+if RUN_TWO_PASS_BACKGROUND:
+    subprocess.run([sys.executable, str(WEAK_ROOT / "scripts/run_background.py"),
+        "--two-pass", "--sequences", WEAK_SEQUENCE, "--box-size", "64", "--filter-size", "5",
+        "--split-manifest", str(FROZEN_SPLIT),
+        "--output-root", str(EXPERIMENT_ROOT / "background")], cwd=WEAK_ROOT, check=True)
+if RUN_V3_DETECTION:
+    subprocess.run([sys.executable, str(WEAK_ROOT / "scripts/evaluation/run_blind_joint_detection.py"),
+        "--method", "v3", "--input-root", str(EXPERIMENT_ROOT / "background"),
+        "--output-root", str(EXPERIMENT_ROOT / "joint"), "--sequences", WEAK_SEQUENCE], cwd=WEAK_ROOT, check=True)
+print("运行开关:", RUN_STAGE_RECOVERY, RUN_TWO_PASS_BACKGROUND, RUN_V3_DETECTION)
+print("独立实验目录:", EXPERIMENT_ROOT)
+""")
+
+md("""
+## 7. 2026-08-26 实测验证结果（只读展示）
+
+本节只读取独立实验目录，不执行预处理、训练或推理。使用冻结 validation 帧与模拟源，星表不参与。
+网格消融使用每序列 4 帧，配对注入使用每序列 8 帧、4 个位置和 6000/12000 DN 档位；这是诊断小样本，
+不是独立 test 集性能验收。旧 400 帧检查点在新背景上的结果是跨预处理对照，不代表已重训。
+`paper_input_coadd` 与 `asteris` 是同一批曝光、同一共加输入和相同单图盲检的网络对照；
+不能把它们与原生多曝光检测的全部差别都归因于网络。
+
+详细解释见 `docs/evaluation/validation_20260826.md`。下面只展示已完整结束的实验。
+""")
+code("""
+from pathlib import Path
+import json
+import pandas as pd
+from IPython.display import display
+start = Path.cwd().resolve()
+RESULT_PROJECT = next(p for p in (start, *start.parents) if (p / "src" / "astr_ir").is_dir())
+RESULT_ROOT = RESULT_PROJECT / "data/processed/weak_source_v3_validation_20260826"
+screen = RESULT_ROOT / "background_screen/summary.csv"
+if screen.exists():
+    meshes = pd.read_csv(screen, dtype={"sequence": str})
+    display(meshes.loc[meshes["mode"].eq("two_pass") &
+        ((meshes.box.eq(32) & meshes["filter"].eq(1)) | (meshes.box.eq(64) & meshes["filter"].eq(5)))])
+completed = []
+for path in sorted(RESULT_ROOT.glob("*/stage_summary.csv")):
+    progress = json.loads((path.parent / "progress.json").read_text(encoding="utf-8"))
+    if progress.get("complete"):
+        table = pd.read_csv(path)
+        table.insert(0, "experiment", path.parent.name)
+        completed.append(table)
+if completed:
+    recovery_results = pd.concat(completed, ignore_index=True)
+    display(recovery_results.loc[recovery_results.threshold.eq(5), ["experiment", "stage", "flux",
+        "eligible_new", "recovered_new", "median_flux_response", "new_unmatched_candidates"]])
+    print("阈值 5 是经验分数，不是已校准的 5-sigma 误报概率。新增未匹配峰不等于假源。")
+else:
+    print("还没有完成的配对注入结果。")
+misses = RESULT_ROOT / "miss_diagnostic/diagnostic.json"
+if misses.exists():
+    display(pd.json_normalize(json.loads(misses.read_text(encoding="utf-8")))[["x", "y", "recovered", "score",
+        "nearest_distance", "nearest.fit_flag"]])
+decision = RESULT_ROOT / "validation_summary.json"
+if decision.exists():
+    print(json.loads(decision.read_text(encoding="utf-8")).get("training_decision", "尚未记录训练决定"))
+print("结果目录:", RESULT_ROOT)
+""")
+
+md("""
+## 8. 拥挤源组修复复核（只读，不训练）
+
+`max_group=12` 改为稠密/稀疏路径切换点，不再整组拒绝；大组在原始有效像元上联合拟合通量和邻源协方差。
+局部窗口只细化位置，整组目标改善后才接受。真正退化、非正通量及覆盖不足仍拒绝，阈值不变。
+这里复用上一轮两个序列的固定 validation 曝光/模拟位置，独立保存旧规则与新拟合的对照。
+旧规则分支只模拟此前的组大小拒绝；序列 90000002 的高通量结果还与历史候选表逐列核对。
+先在未注入图上识别已有候选，已有位置从新增恢复分母中剔除；不能把更多候选直接当作更多真实弱源。
+这不是完整下游流程/网络测试，未使用真实星表调参，未改 FITS 或权重。说明见 `docs/evaluation/crowded_fit_20260826.md`。
+""")
+code("""
+from pathlib import Path
+import json
+import pandas as pd
+from IPython.display import display
+start = Path.cwd().resolve()
+CROWDED_PROJECT = next(p for p in (start, *start.parents) if (p / "src" / "astr_ir").is_dir())
+CROWDED_ROOT = CROWDED_PROJECT / "data/processed/crowded_fit_validation_20260826"
+for sequence in ("90000002", "90000003"):
+    destination = CROWDED_ROOT / sequence
+    progress_file = destination / "progress.json"
+    if not progress_file.exists() or not json.loads(progress_file.read_text(encoding="utf-8")).get("complete"):
+        print(sequence, "尚未完成；不展示部分结果为最终结果")
+        continue
+    print(sequence, "flux=0 为未注入基线；其余行的 flux 是每曝光积分通量 DN")
+    comparison = pd.read_csv(destination / "comparison.csv")
+    display(comparison[["method", "flux", "recovered_new", "eligible_new", "preexisting",
+        "accepted", "size_rejected", "degenerate", "largest_group", "new_unmatched_candidates"]])
+    replay = json.loads((destination / "report.json").read_text(encoding="utf-8"))
+    print("历史候选表重现:", replay["historical_candidates_reproduced"])
+    display(pd.read_csv(destination / "source_recovery.csv")[["method", "flux", "x", "y",
+        "recovered", "preexisting", "nearest_flag", "nearest_group_size"]])
+print("新增未匹配候选不等于假源；该小样本不提供固定误报率下的完整度结论。")
+""")
+
+md("""
+## 9. 背景方案与 ASTERIS 同配置对照（只读展示）
+先在 validation 选择背景，再在 400 帧固定划分上分别训练对照与新版，最后使用 test 帧验收。
+本节不执行处理或训练。真实星表只在最终图像中标注，不能解释为已检出。
+详细方案和结果见 docs/evaluation/background_ablation_20260826.md。
+""")
+code("""
+from pathlib import Path
+import json
+import pandas as pd
+from IPython.display import display, Image
+start = Path.cwd().resolve()
+ABLATION_PROJECT = next(p for p in (start, *start.parents) if (p / 'src/astr_ir').is_dir())
+ABLATION_ROOT = ABLATION_PROJECT / 'data/processed/background_ablation_20260826'
+for name in ('background_selection.csv', 'final_comparison.csv', 'paired_test_comparison.csv'):
+    path = ABLATION_ROOT / name
+    if path.exists():
+        print(name)
+        display(pd.read_csv(path))
+for path in sorted((ABLATION_ROOT / 'models').glob('*/checkpoints/training_history.csv')):
+    print(path.parent.parent.name, '训练记录（完成状态见 training_progress.json）')
+    display(pd.read_csv(path).tail())
+status = ABLATION_ROOT / 'completion.json'
+print(json.loads(status.read_text(encoding='utf-8')) if status.exists() else '实验仍在执行；部分记录不是最终验收。')
+preview = ABLATION_PROJECT / 'figures/background_ablation_output/comparison.png'
+if preview.exists():
+    display(Image(filename=str(preview)))
+print('星表可视化目录:', ABLATION_PROJECT / 'figures/background_ablation_output')
+print('无源模拟误报预算仅在模拟模型下成立；真实天空未匹配候选不等于假源。')
 """)
 
 path=ROOT/'notebooks/evaluation/02_blind_pre_asteris_pipeline.ipynb'

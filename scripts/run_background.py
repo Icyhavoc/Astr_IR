@@ -24,16 +24,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--limit-per-sequence", type=int)
+    parser.add_argument("--two-pass", action="store_true", help="Image-only coadd masks; requires a fresh --output-root")
+    parser.add_argument("--box-size", type=int, default=64)
+    parser.add_argument("--filter-size", type=int, default=5)
+    parser.add_argument("--split-manifest", type=Path, help="Generate two-pass masks within frozen train/validation/test splits")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    config=BackgroundConfig(final_box_size=args.box_size,final_filter_size=args.filter_size)
+    if args.two_pass:
+        from astr_ir.background.sequence import run_two_pass_batch
+        if args.overwrite:
+            raise ValueError('Two-pass experiments must use fresh output directories, not --overwrite')
+        stats=run_two_pass_batch(args.input_root,args.dataset_root,args.output_root,
+            background_config=config,sequences=tuple(args.sequences) if args.sequences else None,
+            limit_per_sequence=args.limit_per_sequence,split_manifest=args.split_manifest)
+        print(stats.groupby(['sequence','status']).size().to_string())
+        return
     stats = run_batch(
         args.input_root,
         args.dataset_root,
         args.output_root,
-        config=BackgroundConfig(),
+        config=config,
         sequences=tuple(args.sequences) if args.sequences else None,
         overwrite=args.overwrite,
         limit_per_sequence=args.limit_per_sequence,

@@ -27,11 +27,54 @@ def test_display_excludes_dq_without_modifying_fits(tmp_path):
     path = tmp_path/'image.fits'
     image = np.ones((30,30),np.float32); image[8,9] = 1e10
     dq = np.zeros_like(image,dtype=np.uint16); dq[8,9] = 1
+    dq[8,8] = 8  # PARTIAL_COVERAGE alone is not a reason to hide a valid coadd pixel.
     fits.HDUList([fits.PrimaryHDU(image),fits.ImageHDU(dq,name='DQ')]).writeto(path)
     before = path.read_bytes()
     display,_ = viz.read_display_image(path)
     assert np.isnan(display[8,9]) and display[8,8] == 1
     assert path.read_bytes() == before
+
+
+def test_display_cmap_is_opaque_neutral_gray_without_global_mutation():
+    original_bad = matplotlib.colormaps['gray'].get_bad().copy()
+    assert np.allclose(viz._display_cmap().get_bad(), [128/255,128/255,128/255,1])
+    assert np.array_equal(matplotlib.colormaps['gray'].get_bad(), original_bad)
+
+
+def test_cosmetic_fill_only_small_enclosed_holes_and_never_changes_validity():
+    image = np.full((40,40),7.)
+    image[8,8] = np.nan
+    image[15:17,15:17] = np.nan
+    image[:2,5] = np.nan  # edge-connected; do not extrapolate
+    image[25:30,25:30] = np.nan  # larger than 16 pixels
+    before = image.copy()
+    filled,mask = viz.interpolate_display_holes(image)
+    valid = np.isfinite(image)
+    assert mask.sum() == 5 and np.allclose(filled[mask],7.)
+    assert np.array_equal(filled[valid],image[valid])
+    assert np.isnan(filled[:2,5]).all() and np.isnan(filled[25:30,25:30]).all()
+    assert np.array_equal(image,before,equal_nan=True)
+    points = pd.DataFrame(dict(x_pix_0based=[8.],y_pix_0based=[8.]))
+    assert not viz.transfer_positions(points,(0,0),image).valid_at_position.iloc[0]
+    assert np.isfinite(filled[8,8])  # does not make the ORIGINAL position valid
+    empty,mask = viz.interpolate_display_holes(np.full((8,8),np.nan))
+    assert np.isnan(empty).all() and not mask.any()
+    for bad_size in (0,-1,1.5):
+        with pytest.raises(ValueError,match='positive integer'):
+            viz.interpolate_display_holes(image,max_hole_pixels=bad_size)
+
+
+def test_cosmetic_fill_uses_original_neighbors_not_newly_filled_pixels():
+    image = np.arange(400,dtype=float).reshape(20,20)
+    image[8:10,8:10] = np.nan
+    shown,fill = viz.interpolate_display_holes(image)
+    for y,x in np.argwhere(fill):
+        neighbors = image[y-3:y+4,x-3:x+4]
+        yy,xx = np.mgrid[-3:4,-3:4]
+        weights = np.exp(-(xx**2+yy**2)/2)
+        valid = np.isfinite(neighbors)
+        expected = np.sum(neighbors[valid]*weights[valid])/weights[valid].sum()
+        assert shown[y,x] == pytest.approx(expected)
 
 
 def test_registration_rejects_poor_transfer(monkeypatch):
@@ -56,6 +99,8 @@ def test_export_is_offline_preserves_inputs_and_rejects_stale_catalog(tmp_path,m
         x_pix_0based=[15.2],y_pix_0based=[16.8],catalog_ra_deg=ra,catalog_dec_deg=dec)).to_csv(cat/'weak_sources.csv',index=False)
     (cat/'astrometric_solution.json').write_text(json.dumps(dict(anchor_rms_pix=.2)))
     image = np.random.default_rng(3).normal(size=(32,32)).astype(np.float32)
+    image[17,15] = np.nan  # catalog position is invalid even in the filled view
+    image[0,0] = np.nan
     for profile in ('160','400'):
         model = processed/f'asteris_paper_{profile}'
         coadds = model/'coadds/s'; coadds.mkdir(parents=True)
@@ -73,11 +118,21 @@ def test_export_is_offline_preserves_inputs_and_rejects_stale_catalog(tmp_path,m
     before = {p:p.read_bytes() for p in processed.rglob('*') if p.is_file()}
     result = viz.export_catalog_validation(tmp_path,sequences=('s',),dpi=50,cutout_half_size=8)
     assert len(result) == 1 and result[0]['weak_sources'] == 1
-    assert len(list((tmp_path/'figures').rglob('*.png'))) == 5
+    assert len(list((tmp_path/'figures').rglob('*.png'))) == 10
+    assert 'display_interpolated' in result[0]['display_interpolated']['overlays']['weighted_coadd']
+    for stats in result[0]['mask_statistics'].values():
+        assert stats == dict(has_dq=False,invalid_pixels=2,display_filled_pixels=1,remaining_invalid_pixels=1)
     assert all(p.read_bytes() == content for p,content in before.items())
     points = pd.read_csv(tmp_path/'figures/catalog_validation_output/s/plotted_positions.csv')
     assert np.isclose(points.loc[points['product']=='weighted_coadd','x_plot'].iloc[0],14.7)
     assert np.isclose(points.loc[points['product']=='asteris160','x_plot'].iloc[0],15.2)
+    assert not points.valid_at_position.any()
+    metadata = json.loads((tmp_path/'figures/catalog_validation_output/s/visualization_metadata.json').read_text())
+    assert metadata['interpolation']['enabled'] and metadata['interpolation']['max_hole_pixels'] == 16
+    mask_only = viz.export_catalog_validation(tmp_path,sequences=('s',),dpi=50,cutout_half_size=8,
+        output_dir=tmp_path/'figures/mask_only',export_interpolated=False)
+    assert mask_only[0]['display_interpolated'] is None
+    assert len(list((tmp_path/'figures/mask_only').rglob('*.png'))) == 5
     with pytest.raises(ValueError,match='inside project figures'):
         viz.export_catalog_validation(tmp_path,output_dir=processed)
     with pytest.raises(FileNotFoundError,match='No previously calibrated'):

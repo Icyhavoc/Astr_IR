@@ -26,12 +26,17 @@ run_flicker.py → run_background.py → run_noise2noise.py
 
 常用辅助命令（需要相应数据/模型已准备好）：
 
+新增弱源实验入口为 `evaluation/run_stage_recovery.py`、`run_background.py --two-pass` 和
+`evaluation/run_blind_joint_detection.py --method v3`；均使用新的实验目录，不自动启动训练。
+详见 [V3 使用边界与命令](../docs/evaluation/weak_source_v3.md)。旧默认入口继续复现历史基线。
+
 ```powershell
 python scripts/evaluation/run_asteris_paper_evaluation.py --profile 160 --device cuda
 python scripts/evaluation/run_asteris_paper_evaluation.py --profile 400 --device cuda
 python scripts/evaluation/compare_asteris_paper_profiles.py
 python scripts/evaluation/annotate_asteris_paper_catalog.py
 python scripts/evaluation/run_blind_joint_detection.py
+python scripts/evaluation/verify_crowded_fit.py --reference-run data/processed/weak_source_v3_validation_20260826/pilot_90000002 --output-root data/processed/crowded_fit_trial01/90000002
 python scripts/evaluation/run_source_evaluation.py --model noise2noise --device cuda
 python scripts/evaluation/plot_source_evaluation.py
 python scripts/validation/validate_products.py
@@ -76,3 +81,10 @@ python scripts/validation/validate_source_evaluation.py
 当前图像版本见 [figures/README.md](../figures/README.md)。辅助脚本不读取已归档的旧图或早期 N2N 评估表。
 若追溯旧 ASTERIS4 的通用评估，必须显式提供归档的 `--model-output-root` 及单独 `--evaluation-root`；
 不能使用当前 background 冒充其旧输入。论文版评估继续使用 `evaluation/run_asteris_paper_evaluation.py`。
+
+## 背景与 ASTERIS 同配置对照
+
+`evaluation/run_background_ablation.py` 将 validation 背景选择、旧 FITS 审计、新背景生成、
+共享划分准备、训练、阈值校准和独立 test 评估分成显式子命令。只有 `train` 会训练。
+`evaluation/report_background_ablation.py` 只读取完成的结果，写汇总和 figures 下的星表核验 PNG；不修改科学 FITS。
+方案与状态见 [背景对照实验](../docs/evaluation/background_ablation_20260826.md)。

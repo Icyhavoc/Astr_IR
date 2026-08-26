@@ -15,6 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import time
 from typing import Sequence
 import warnings
 
@@ -195,6 +196,7 @@ def prepare_paper_dataset(
     *,
     sequences: Sequence[str],
     config: PaperAsterisConfig = PaperAsterisConfig(),
+    frozen_manifest: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Freeze splits and materialize paper-style normalized training stacks."""
 
@@ -202,13 +204,32 @@ def prepare_paper_dataset(
     input_root, dataset_root, output_root = Path(input_root), Path(dataset_root), Path(output_root)
     manifest_root = output_root / "manifests"
     manifest_root.mkdir(parents=True, exist_ok=True)
-    split = build_split_manifest(
-        input_root,
-        dataset_root,
-        manifest_root / "split_manifest.csv",
-        sequences=tuple(sequences),
-    )
-    split = relabel_manifest_for_patch_t(split, 8)
+    if frozen_manifest is None:
+        split = build_split_manifest(
+            input_root,
+            dataset_root,
+            manifest_root / "split_manifest.csv",
+            sequences=tuple(sequences),
+        )
+        split = relabel_manifest_for_patch_t(split, 8)
+    else:
+        # A newly generated image-only manifest can be shared by background
+        # ablations: freeze both frame membership and registration across arms.
+        split = frozen_manifest.copy(deep=True)
+        required = {'frame_id', 'sequence', 'frame_index', 'split', 'product_path',
+                    'filename', 'alignment_dx', 'alignment_dy'}
+        if not required.issubset(split.columns) or split.frame_id.duplicated().any():
+            raise ValueError('Invalid frozen experiment manifest')
+        if set(split.sequence.astype(str)) != set(map(str, sequences)):
+            raise ValueError('Frozen sequences differ from requested sequences')
+        if not split.split.isin(['train', 'validation', 'test', 'guard']).all():
+            raise ValueError('Unknown frozen split')
+        if not np.isfinite(split[['alignment_dx', 'alignment_dy']].to_numpy(float)).all():
+            raise ValueError('Invalid frozen registration')
+        for value in split.product_path:
+            resolved = (input_root / value).resolve()
+            if not resolved.is_relative_to(input_root.resolve()) or not resolved.is_file():
+                raise ValueError('Missing or unsafe frozen product path')
     split.to_csv(manifest_root / "split_manifest.csv", index=False, encoding="utf-8-sig")
     detector_mask = load_detector_mask(dataset_root)
     stack_rows = []
@@ -435,11 +456,13 @@ def train_paper_model(
     best_path, last_path = checkpoint_root / "best_checkpoint.pt", checkpoint_root / "last_checkpoint.pt"
     history, best_loss, stale = [], float("inf"), 0
     amp_enabled = bool(config.amp and device_obj.type == "cuda")
+    training_started = time.monotonic()
     for epoch in range(config.epochs):
+        epoch_started = time.monotonic()
         train_data.set_epoch(epoch)
         model.train()
         train_values = []
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader):
             inputs = batch["input"].to(device_obj)
             targets = batch["target"].to(device_obj)
             masks = batch["mask"].to(device_obj)
@@ -454,6 +477,8 @@ def train_paper_model(
             # factor for AMP backpropagation while retaining official logged
             # losses and the exact relative weighting of both objectives.
             optimization_loss = loss / config.loss_scale if amp_enabled else loss
+            if not torch.isfinite(optimization_loss):
+                raise FloatingPointError(f'Non-finite training loss at epoch {epoch+1}, batch {batch_index+1}')
             old_scale = scaler.get_scale()
             scaler.scale(optimization_loss).backward()
             scaler.step(optimizer)
@@ -461,6 +486,11 @@ def train_paper_model(
             if scaler.get_scale() >= old_scale:
                 scheduler.step()
             train_values.append((loss.item(), stack_l1.item(), mean_l2.item()))
+            if (batch_index + 1) % 40 == 0:
+                (checkpoint_root / 'training_progress.json').write_text(json.dumps(dict(
+                    phase='train', epoch=epoch+1, batch=batch_index+1, batches=len(train_loader),
+                    elapsed_seconds=time.monotonic()-training_started, complete=False)), encoding='utf-8')
+                print(f'epoch {epoch+1:03d} batch {batch_index+1}/{len(train_loader)}', flush=True)
         model.eval()
         validation_values = []
         with torch.inference_mode():
@@ -476,6 +506,8 @@ def train_paper_model(
                 validation_values.append(tuple(value.item() for value in values))
         train_mean = np.mean(train_values, axis=0)
         validation_mean = np.mean(validation_values, axis=0)
+        if not np.isfinite(validation_mean).all():
+            raise FloatingPointError(f'Non-finite validation loss at epoch {epoch+1}')
         row = {
             "epoch": epoch + 1,
             "train_loss": train_mean[0],
@@ -485,8 +517,10 @@ def train_paper_model(
             "validation_stack_l1": validation_mean[1],
             "validation_mean_l2": validation_mean[2],
             "learning_rate": optimizer.param_groups[0]["lr"],
+            "epoch_seconds": time.monotonic() - epoch_started,
         }
         history.append(row)
+        pd.DataFrame(history).to_csv(checkpoint_root / 'training_history.csv', index=False, encoding='utf-8-sig')
         state = {
             "epoch": epoch,
             "model_state": model.state_dict(),
@@ -513,6 +547,9 @@ def train_paper_model(
             break
     history_frame = pd.DataFrame(history)
     history_frame.to_csv(checkpoint_root / "training_history.csv", index=False, encoding="utf-8-sig")
+    (checkpoint_root / 'training_progress.json').write_text(json.dumps(dict(
+        phase='complete', epochs=len(history), best_validation_loss=best_loss,
+        elapsed_seconds=time.monotonic()-training_started, complete=True)), encoding='utf-8')
     return best_path, history_frame
 
 
