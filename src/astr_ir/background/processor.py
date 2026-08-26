@@ -29,6 +29,8 @@ from scipy.ndimage import (
 )
 from scipy.signal import fftconvolve
 
+from astr_ir.dq import build_dq, write_fits_with_dq
+
 
 @dataclass
 class BackgroundConfig:
@@ -637,11 +639,26 @@ def write_fits_products(
     original32 = result.original.astype(np.float32)
     model32 = result.background_model.astype(np.float32)
     corrected32 = original32 - model32
-    fits.PrimaryHDU(
-        corrected32, header=_output_header(header, result, "subtracted", config)
-    ).writeto(corrected_path, overwrite=overwrite, output_verify="silentfix")
-    fits.PrimaryHDU(model32, header=_output_header(header, result, "model", config)).writeto(
-        model_path, overwrite=overwrite, output_verify="silentfix"
+    dq = build_dq(
+        corrected32.shape,
+        detector_bad=result.detector_mask,
+        no_coverage=~np.isfinite(result.original),
+    )
+    write_fits_with_dq(
+        corrected_path,
+        corrected32,
+        _output_header(header, result, "subtracted", config),
+        dq,
+        overwrite=overwrite,
+        output_verify="silentfix",
+    )
+    write_fits_with_dq(
+        model_path,
+        model32,
+        _output_header(header, result, "model", config),
+        dq,
+        overwrite=overwrite,
+        output_verify="silentfix",
     )
     written_subtracted = np.asarray(fits.getdata(corrected_path), dtype=np.float32)
     written_model = np.asarray(fits.getdata(model_path), dtype=np.float32)

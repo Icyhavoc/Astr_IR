@@ -2,7 +2,8 @@
 
 The module keeps the scientific workflow explicit so that the companion
 notebook can expose every stage independently.  Detector blind maps are used
-directly as an exclusion mask; no separate DQ product is created.
+directly as an exclusion mask and are also preserved in each FITS ``DQ``
+extension so downstream tools cannot accidentally treat blind values as data.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ from scipy.ndimage import (
     median_filter,
     zoom,
 )
+
+from astr_ir.dq import build_dq, write_fits_with_dq
 
 
 Direction = Literal["auto", "row", "column"]
@@ -144,7 +147,7 @@ def load_fits(path: str | Path) -> tuple[np.ndarray, fits.Header]:
 
 
 def load_detector_mask(blind_map_dir: str | Path) -> np.ndarray:
-    """Union DeadBlindMap and NoiseBlindMap directly (no redundant DQ array)."""
+    """Return the union of DeadBlindMap and NoiseBlindMap."""
 
     blind_map_dir = Path(blind_map_dir)
     masks: list[np.ndarray] = []
@@ -675,7 +678,7 @@ def _output_header(
     out["HIERARCH FLK SCORE"] = round(float(result.metrics["direction_score"]), 6)
     out["HIERARCH FLK REDUC"] = round(float(result.metrics["relative_reduction"]), 6)
     out.add_history("1/f correction implemented by astr_ir.flicker.processor")
-    out.add_history("Detector exclusion mask is DeadBlindMap OR NoiseBlindMap; no DQ product.")
+    out.add_history("Detector exclusion mask is DeadBlindMap OR NoiseBlindMap; see DQ extension.")
     return out
 
 
@@ -696,11 +699,26 @@ def write_fits_products(
     original32 = result.original.astype(np.float32)
     model32 = result.flicker_model.astype(np.float32)
     corrected32 = original32 - model32
-    fits.PrimaryHDU(corrected32, header=_output_header(header, result, "corrected")).writeto(
-        corrected_path, overwrite=overwrite, output_verify="silentfix"
+    dq = build_dq(
+        corrected32.shape,
+        detector_bad=result.detector_mask,
+        no_coverage=~np.isfinite(result.original),
     )
-    fits.PrimaryHDU(model32, header=_output_header(header, result, "model")).writeto(
-        model_path, overwrite=overwrite, output_verify="silentfix"
+    write_fits_with_dq(
+        corrected_path,
+        corrected32,
+        _output_header(header, result, "corrected"),
+        dq,
+        overwrite=overwrite,
+        output_verify="silentfix",
+    )
+    write_fits_with_dq(
+        model_path,
+        model32,
+        _output_header(header, result, "model"),
+        dq,
+        overwrite=overwrite,
+        output_verify="silentfix",
     )
     written_corrected = np.asarray(fits.getdata(corrected_path), dtype=np.float32)
     written_model = np.asarray(fits.getdata(model_path), dtype=np.float32)

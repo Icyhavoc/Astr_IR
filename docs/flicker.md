@@ -58,7 +58,7 @@ detector_mask = (DeadBlindMap != 0) | (NoiseBlindMap != 0)
 ```
 
 该 detector mask 直接与星源掩膜、边缘掩膜和非有限像元合并，且只用于“哪些像元不能参与条纹估计”。
-这样既执行了文档中 DQ 的质量屏蔽意图，又没有重复构造老师认为本任务不需要的 DQ 产品。代码入口是
+这样既执行了质量屏蔽，也在每个派生 FITS 的 `DQ` 扩展中保留 `DO_NOT_USE`/`DETECTOR_BAD` 信息，避免文件离开本项目代码后盲元状态丢失。代码入口是
 `load_detector_mask()` 与 `combine_masks()`。
 
 ## 算法和质量门

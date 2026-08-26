@@ -140,6 +140,8 @@ def test_fits_outputs_preserve_header_and_float32_equation(tmp_path: Path):
     subtracted = fits.getdata(subtracted_path)
     model = fits.getdata(model_path)
     output_header = fits.getheader(subtracted_path)
+    with fits.open(subtracted_path) as hdul:
+        assert hdul["DQ"].data.shape == subtracted.shape
     assert output_header["EXPOSURE"] == 1.0
     assert output_header["TELESCOP"] == "RKZ50"
     assert output_header["HIERARCH FLK APPL"]

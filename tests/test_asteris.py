@@ -15,10 +15,17 @@ from astr_ir.asteris.dataset import (
 )
 from astr_ir.asteris.inference import denoise_array
 from astr_ir.asteris.model import build_asteris_model
-from astr_ir.asteris.paper_pipeline import paper_asteris_loss, paper_sigma_clip, process_nmean
+from astr_ir.asteris.paper_pipeline import (
+    PaperAsterisConfig,
+    denoise_registered_exposures,
+    paper_asteris_loss,
+    paper_sigma_clip,
+    process_nmean,
+)
 from astr_ir.asteris.preprocessing import (
     build_noise_estimation_mask,
     circular_source_mask,
+    fill_invalid_with_temporal_mean,
     fit_normalization,
     sigma_clip_stack,
 )
@@ -178,6 +185,31 @@ class Zero3D(Identity3D):
         return torch.zeros_like(value) + 0.0 * self.anchor
 
 
+def test_paper_coadd_uses_partial_coverage_and_keeps_zero_coverage_nan():
+    rng = np.random.default_rng(17)
+    stack = rng.normal(100.0, 2.0, (16, 32, 32)).astype(np.float32)
+    valid = np.ones_like(stack, dtype=bool)
+    valid[:, 0, 0] = False
+    valid[:4, 1, 1] = False
+    input_coadd, denoised, output_valid, _ = denoise_registered_exposures(
+        stack,
+        valid,
+        Identity3D(),
+        PaperAsterisConfig(
+            temporal_sigma=0.0,
+            global_sigma=0.0,
+            inference_tile_size=32,
+            inference_overlap=8,
+            amp=False,
+        ),
+        device="cpu",
+    )
+    assert not output_valid[0, 0]
+    assert np.isnan(input_coadd[0, 0]) and np.isnan(denoised[0, 0])
+    assert output_valid[1, 1]
+    assert np.isfinite(input_coadd[1, 1]) and np.isfinite(denoised[1, 1])
+
+
 def test_same_evaluation_interface_preserves_identity_image():
     rng = np.random.default_rng(5)
     image = rng.normal(size=(32, 32)).astype(np.float32)
@@ -256,6 +288,26 @@ def test_process_nmean_builds_eight_independent_bins():
     assert output.shape == (8, 1, 1)
     assert np.allclose(output[:, 0, 0], np.arange(0.5, 16.0, 2.0))
     assert mask.all()
+
+
+def test_invalid_model_context_uses_temporal_mean_but_keeps_mask_external():
+    stack = np.array([[[1.0, 10.0]], [[3.0, 20.0]], [[5.0, 30.0]]], dtype=np.float32)
+    valid = np.array([[[True, False]], [[False, False]], [[True, False]]])
+    filled = fill_invalid_with_temporal_mean(stack, valid, neutral=0.0)
+    assert np.array_equal(valid, np.array([[[True, False]], [[False, False]], [[True, False]]]))
+    assert np.allclose(filled[:, 0, 0], [1.0, 3.0, 5.0])
+    assert np.allclose(filled[:, 0, 1], 0.0)
+
+
+def test_paper_loss_fully_ignores_invalid_temporal_prediction():
+    target = torch.zeros((1, 1, 2, 1, 1))
+    mask = torch.tensor([[[[[1.0]], [[0.0]]]]])
+    first = torch.tensor([[[[[1.0]], [[1000.0]]]]])
+    second = torch.tensor([[[[[1.0]], [[-1000.0]]]]])
+    losses_a = paper_asteris_loss(first, target, mask)
+    losses_b = paper_asteris_loss(second, target, mask)
+    for loss_a, loss_b in zip(losses_a, losses_b, strict=True):
+        assert torch.equal(loss_a, loss_b)
 
 
 def test_paper_loss_uses_released_stack_weight():

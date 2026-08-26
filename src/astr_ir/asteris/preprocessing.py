@@ -219,3 +219,36 @@ def normalize_stack(stack: np.ndarray, valid_mask: np.ndarray, mean: float, std:
     normalized = (np.asarray(stack, np.float32) - float(mean)) / float(std)
     normalized[~np.asarray(valid_mask, bool) | ~np.isfinite(normalized)] = 0.0
     return normalized.astype(np.float32)
+
+
+def fill_invalid_with_temporal_mean(
+    stack: np.ndarray,
+    valid_mask: np.ndarray,
+    *,
+    neutral: float = 0.0,
+) -> np.ndarray:
+    """Make a finite model input while keeping validity as separate truth.
+
+    Invalid detector samples are replaced only in the transient neural-network
+    input.  The replacement is the mean of valid temporal samples at the same
+    registered sky pixel; pixels with no temporal coverage receive ``neutral``.
+    This prevents a fixed zero-valued blind-map pattern from becoming a learned
+    image feature.  Callers must continue to use ``valid_mask`` for losses,
+    coadds, photometry, and output DQ.
+    """
+
+    values = np.asarray(stack, dtype=np.float32)
+    valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(values)
+    if values.shape != valid.shape or values.ndim != 3:
+        raise ValueError("stack and valid_mask must have the same (time, height, width) shape")
+    count = valid.sum(axis=0)
+    total = np.where(valid, values, 0.0).sum(axis=0, dtype=np.float64)
+    temporal = np.divide(
+        total,
+        count,
+        out=np.full(values.shape[1:], float(neutral), dtype=np.float64),
+        where=count > 0,
+    ).astype(np.float32)
+    filled = np.where(valid, values, temporal[None]).astype(np.float32)
+    filled[~np.isfinite(filled)] = float(neutral)
+    return filled

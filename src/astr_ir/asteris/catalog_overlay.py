@@ -389,6 +389,7 @@ def _write_annotated_fits(
 ) -> None:
     with fits.open(source_path) as hdul:
         primary = fits.PrimaryHDU(np.asarray(hdul[0].data), header=hdul[0].header.copy())
+        inherited_extensions = [hdu.copy() for hdu in hdul[1:] if hdu.name != "CATALOG"]
     for key, value in wcs.to_header(relax=True).items():
         primary.header[key] = value
     primary.header["CATREF"] = ("2MASS+GaiaDR3", "Astrometric reference catalogs")
@@ -403,7 +404,7 @@ def _write_annotated_fits(
         catalog[column] = catalog[column].fillna("").astype(str)
     catalog_hdu = fits.BinTableHDU(Table.from_pandas(catalog, index=False), name="CATALOG")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    fits.HDUList([primary, catalog_hdu]).writeto(destination, overwrite=True)
+    fits.HDUList([primary, *inherited_extensions, catalog_hdu]).writeto(destination, overwrite=True)
 
 
 def _display_limits(images: list[np.ndarray]) -> tuple[float, float]:

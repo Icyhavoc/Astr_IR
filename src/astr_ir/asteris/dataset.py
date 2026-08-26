@@ -15,7 +15,12 @@ from torch.utils.data import Dataset
 
 from astr_ir.noise2noise.dataset import load_detector_mask
 
-from .preprocessing import circular_source_mask, normalize_stack, sigma_clip_stack
+from .preprocessing import (
+    circular_source_mask,
+    fill_invalid_with_temporal_mean,
+    normalize_stack,
+    sigma_clip_stack,
+)
 
 
 def relabel_manifest_for_patch_t(split_manifest: pd.DataFrame, patch_t: int) -> pd.DataFrame:
@@ -260,6 +265,8 @@ class AsterisPatchDataset(Dataset):
         first, second = stack[0::2, ys, xs].copy(), stack[1::2, ys, xs].copy()
         first_valid, second_valid = valid[0::2, ys, xs], valid[1::2, ys, xs]
         loss_mask = first_valid & second_valid
+        first = fill_invalid_with_temporal_mean(first, first_valid)
+        second = fill_invalid_with_temporal_mean(second, second_valid)
         if rng.random() < 0.5:
             first, second = second, first
         if self.augment:

@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 
 from astr_ir.noise2noise.dataset import build_split_manifest, load_detector_mask
 from astr_ir.noise2noise.processor import aperture_flux_snr, neighbor_difference_noise
+from astr_ir.dq import build_dq, read_dq, write_fits_with_dq
 
 from .dataset import (
     AsterisPatchDataset,
@@ -29,7 +30,12 @@ from .dataset import (
 )
 from .inference import denoise_registered_stack
 from .model import build_asteris_model, upstream_source_sha256
-from .preprocessing import build_noise_estimation_mask, circular_source_mask, fit_normalization
+from .preprocessing import (
+    build_noise_estimation_mask,
+    circular_source_mask,
+    fill_invalid_with_temporal_mean,
+    fit_normalization,
+)
 
 
 @dataclass(frozen=True)
@@ -418,8 +424,9 @@ def run_inference(
             edge_width=config.edge_width,
             temporal_clip=config.temporal_clip,
         )
+        model_input = fill_invalid_with_temporal_mean(normalized, registered_valid)
         prediction_norm = denoise_registered_stack(
-            normalized,
+            model_input,
             model,
             patch_t=config.patch_t,
             device=device_obj,
@@ -456,6 +463,11 @@ def run_inference(
             denoised[~native_valid | ~np.isfinite(denoised)] = original[~native_valid | ~np.isfinite(denoised)]
             residual = (original - denoised).astype(np.float32)
             denoised = (original - residual).astype(np.float32)
+            dq = build_dq(
+                original.shape,
+                detector_bad=detector_mask,
+                no_coverage=(~native_valid & ~detector_mask) | ~np.isfinite(original),
+            )
             sequence_dir = output_root / "raw_predictions" / str(sequence)
             residual_dir = output_root / "raw_residuals" / str(sequence)
             sequence_dir.mkdir(parents=True, exist_ok=True)
@@ -475,8 +487,13 @@ def run_inference(
                 out_header["HIERARCH AST CKPT"] = checkpoint_hash[:16]
                 out_header["HIERARCH AST SIGMA"] = config.sigma
                 out_header["HIERARCH AST EQ"] = "DENOISED=INPUT-RESIDUAL"
-                fits.PrimaryHDU(data=data.astype(np.float32), header=out_header).writeto(
-                    path, overwrite=overwrite, output_verify="exception"
+                write_fits_with_dq(
+                    path,
+                    data.astype(np.float32),
+                    out_header,
+                    dq,
+                    overwrite=overwrite,
+                    output_verify="exception",
                 )
             metric_mask = detector_mask | ~native_valid | ~np.isfinite(original) | ~np.isfinite(denoised)
             metric_mask[: config.edge_width] = True
@@ -657,6 +674,13 @@ def finalize_calibrated_products(
             original = np.asarray(hdul[0].data, dtype=np.float32)
             header = hdul[0].header.copy()
         raw = np.asarray(fits.getdata(raw_path), dtype=np.float32)
+        dq = read_dq(raw_path, original.shape)
+        if dq is None:
+            dq = build_dq(
+                original.shape,
+                detector_bad=detector_mask,
+                no_coverage=~np.isfinite(original) | ~np.isfinite(raw),
+            )
         denoised = (original + strength * (raw - original)).astype(np.float32)
         denoised[~np.isfinite(raw)] = original[~np.isfinite(raw)]
         residual = (original - denoised).astype(np.float32)
@@ -678,8 +702,13 @@ def finalize_calibrated_products(
             out_header["HIERARCH AST CKPT"] = checkpoint_hash[:16]
             out_header["HIERARCH AST ALPHA"] = strength
             out_header["HIERARCH AST EQ"] = "DENOISED=INPUT-RESIDUAL"
-            fits.PrimaryHDU(data=data, header=out_header).writeto(
-                path, overwrite=overwrite, output_verify="exception"
+            write_fits_with_dq(
+                path,
+                data,
+                out_header,
+                dq,
+                overwrite=overwrite,
+                output_verify="exception",
             )
         target = {key: getattr(row, key) for key in ("xc", "yc", "r_ap", "r_in", "r_out")}
         flux_before, snr_before = aperture_flux_snr(original, target)

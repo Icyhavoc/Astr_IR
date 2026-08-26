@@ -13,7 +13,7 @@
 - 16 张独立曝光随机抽样并交错为 8 帧 input / 8 帧 target；
 - 时间轴 3σ 与全 3D 3σ clipping、MSE 帧排序、全局 z-score、`/4 + 1`；
 - 两半独立中值居中、官方旋转/翻转与 input-target 交换；
-- `1e6 × (0.125 × SmoothL1(stack) + MSE(temporal mean))`；
+- `1e6 × (0.125 × SmoothL1(stack) + MSE(temporal mean))`，只在有效体素上约简；
 - AdamW，学习率 `1.5e-4`、weight decay `1e-4`，余弦 `T_max=2,000,000`；
 - 任意测试曝光先合并成 8 个时间 bin，全强度输出时间平均为一张科学共加图，不做 α 混合。
 
@@ -120,6 +120,10 @@ ASTERIS4 完全相同，仍可逐帧公平比较。
 - 测量表中已知源位置的保护圆。
 
 源保护区域不会被 clipping。被 clipping 的异常像元可以作为有界的网络输入，但会从 loss mask 中排除；blindmap 和非有限像元同时从输入有效区及损失中排除。策略写入 `manifests/clipping_policy.json`；`manifests/clipping_audit.csv` 对两个序列的代表性训练窗口逐项比较 clipping 前后的源峰值、流量、moment FWHM 和 SNR，并要求源区零 clipping、四项变化为零；每帧推理统计表另记录 clipping fraction。
+
+盲元不会被当成零强度科学测量。送入网络前，仅为保证张量有限而用同一注册天空位置的有效时间均值临时填充；没有任何时间覆盖时使用归一化中性值。独立的 validity mask 始终保留，stack loss 和 temporal-mean loss 均按有效计数约简。临时填充值不参与 loss、共加、测光或噪声统计。
+
+所有新生成的 flicker、background、Noise2Noise 和 ASTERIS FITS 保持原图尺寸，并包含 `DQ` 图像扩展：bit 0=`DO_NOT_USE`、bit 1=`DETECTOR_BAD`、bit 2=`NO_COVERAGE`、bit 3=`PARTIAL`。单曝光盲元的 PRIMARY 数值保留以便审计，但必须由 DQ 排除；paper 共加按有效覆盖加权，至少一份有效测量即可贡献，零覆盖位置写为 NaN。
 
 时间轴 3σ clipping 已实现为可选项，但默认关闭。8/16 帧短序列中的 seeing、PSF 和配准变化可能被误判为时间异常，且未编目弱源不能被已知源 mask 保护。只有当验证集的峰值、孔径流量、FWHM 和 SNR 质量门全部通过时，才应启用 `--temporal-clip`。
 

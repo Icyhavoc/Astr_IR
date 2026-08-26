@@ -142,7 +142,7 @@ def test_profile_degradation_metrics_count_local_regressions():
     assert metrics["local_max_increase_dn"] == 2.0
 
 
-def test_dead_and_noise_maps_are_unioned_without_dq(tmp_path: Path):
+def test_dead_and_noise_maps_are_unioned(tmp_path: Path):
     dead = np.zeros((16, 16), dtype=np.uint8)
     noise = np.zeros_like(dead)
     dead[2, 3] = 1
@@ -171,6 +171,8 @@ def test_fits_outputs_preserve_science_header_and_float32_equation(tmp_path: Pat
     corrected = fits.getdata(corrected_path)
     model = fits.getdata(model_path)
     out_header = fits.getheader(corrected_path)
+    with fits.open(corrected_path) as hdul:
+        assert hdul["DQ"].data.shape == corrected.shape
     assert corrected.dtype.kind == "f" and corrected.dtype.itemsize == 4
     assert out_header["EXPOSURE"] == 1.0
     assert out_header["TELESCOP"] == "RKZ50"

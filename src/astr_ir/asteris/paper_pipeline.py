@@ -29,10 +29,12 @@ from torch.utils.data import DataLoader, Dataset
 
 from astr_ir.noise2noise.dataset import build_split_manifest, load_detector_mask
 from astr_ir.noise2noise.processor import neighbor_difference_noise
+from astr_ir.dq import build_dq, write_fits_with_dq
 
 from .dataset import relabel_manifest_for_patch_t
 from .inference import infer_volume
 from .model import build_asteris_model, upstream_source_sha256
+from .preprocessing import fill_invalid_with_temporal_mean
 
 
 def _masked_mean(stack: np.ndarray, valid: np.ndarray, axis: int = 0) -> np.ndarray:
@@ -336,8 +338,8 @@ class PaperAsterisDataset(Dataset):
         first -= first_bias
         second -= second_bias
         loss_mask = first_valid & second_valid
-        first[~first_valid] = 0.0
-        second[~second_valid] = 0.0
+        first = fill_invalid_with_temporal_mean(first, first_valid)
+        second = fill_invalid_with_temporal_mean(second, second_valid)
         if rng.random() < 0.5:
             first, second = second, first
         if self.augment:
@@ -364,15 +366,18 @@ def paper_asteris_loss(
     *,
     loss_scale: float = 1e6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # Match the released trainer exactly: mask by multiplication before the
-    # default mean reduction, average the prediction over all eight slices,
-    # and cap its mean at the maximum target-mean value.
-    stack_l1 = F.smooth_l1_loss(prediction * mask, target * mask) * float(loss_scale)
+    # Invalid detector voxels contribute neither directly nor through the
+    # temporal-mean term.  Reduction by the valid count also prevents samples
+    # with more blind pixels from receiving a smaller effective loss weight.
+    stack_error = F.smooth_l1_loss(prediction, target, reduction="none") * mask
+    stack_l1 = stack_error.sum() / mask.sum().clamp_min(1.0) * float(loss_scale)
     mean_mask = (mask.sum(dim=2) > 0).float()
-    prediction_mean = prediction.mean(dim=2)
-    target_mean = (target * mask).sum(dim=2) / mask.sum(dim=2).clamp_min(1.0)
+    valid_count = mask.sum(dim=2).clamp_min(1.0)
+    prediction_mean = (prediction * mask).sum(dim=2) / valid_count
+    target_mean = (target * mask).sum(dim=2) / valid_count
     prediction_mean = torch.clamp(prediction_mean, max=target_mean.max())
-    mean_l2 = F.mse_loss(prediction_mean * mean_mask, target_mean * mean_mask) * float(loss_scale)
+    mean_error = (prediction_mean - target_mean).square() * mean_mask
+    mean_l2 = mean_error.sum() / mean_mask.sum().clamp_min(1.0) * float(loss_scale)
     total = 0.125 * stack_l1 + mean_l2
     return total, stack_l1, mean_l2
 
@@ -582,7 +587,7 @@ def denoise_registered_exposures(
     mean_image = _masked_mean(model_stack, model_valid)
     bias = float(np.nanmedian(mean_image))
     model_input = model_stack - bias
-    model_input[~model_valid] = 0.0
+    model_input = fill_invalid_with_temporal_mean(model_input, model_valid)
     prediction = infer_volume(
         model_input,
         model,
@@ -599,9 +604,10 @@ def denoise_registered_exposures(
     denoised = (
         (prediction_mean - 1.0) * config.scale_factor * std + center + restored_clip
     ).astype(np.float32)
-    common_valid = np.all(model_valid, axis=0) & np.isfinite(input_coadd) & np.isfinite(denoised)
-    denoised[~common_valid] = input_coadd[~common_valid]
-    return input_coadd, denoised, common_valid, clip_metrics
+    output_valid = np.any(model_valid, axis=0) & np.isfinite(input_coadd) & np.isfinite(denoised)
+    input_coadd[~output_valid] = np.nan
+    denoised[~output_valid] = np.nan
+    return input_coadd, denoised, output_valid, clip_metrics
 
 
 def _checkpoint_hash(path: Path) -> str:
@@ -641,10 +647,16 @@ def run_paper_inference(
     for sequence, group in split.loc[split.split.eq("test")].groupby("sequence", sort=True):
         group = group.sort_values("frame_index").reset_index(drop=True)
         physical, valid = _load_registered_stack(group, input_root, detector_mask)
-        input_coadd, denoised, common_valid, clip_metrics = denoise_registered_exposures(
+        input_coadd, denoised, output_valid, clip_metrics = denoise_registered_exposures(
             physical, valid, model, config, device=device_obj
         )
         residual = (input_coadd - denoised).astype(np.float32)
+        coverage = valid.sum(axis=0)
+        dq = build_dq(
+            input_coadd.shape,
+            no_coverage=~output_valid,
+            partial_coverage=(coverage > 0) & (coverage < len(valid)),
+        )
         header = fits.getheader(input_root / group.iloc[-1].product_path).copy()
         header["HIERARCH AST MODEL"] = "ASTERIS8_PAPER"
         header["HIERARCH AST NEXP"] = len(group)
@@ -665,10 +677,15 @@ def run_paper_inference(
         ):
             out_header = header.copy()
             out_header["HIERARCH AST KIND"] = kind
-            fits.PrimaryHDU(data=data, header=out_header).writeto(
-                path, overwrite=overwrite, output_verify="silentfix"
+            write_fits_with_dq(
+                path,
+                data,
+                out_header,
+                dq,
+                overwrite=overwrite,
+                output_verify="silentfix",
             )
-        metric_mask = ~common_valid
+        metric_mask = ~output_valid
         metric_mask[:32] = True
         metric_mask[-32:] = True
         metric_mask[:, :32] = True

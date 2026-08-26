@@ -17,6 +17,8 @@ from astropy.io import fits
 from scipy.ndimage import gaussian_filter
 from torch.utils.data import DataLoader
 
+from astr_ir.dq import build_dq, write_fits_with_dq
+
 from .dataset import (
     PairedPatchDataset,
     build_pair_manifest,
@@ -607,18 +609,31 @@ def run_inference(
         residual_root.mkdir(parents=True, exist_ok=True)
         denoised_path = sequence_root / f"noise2noise_denoised_{frame.filename}"
         residual_path = residual_root / f"noise2noise_residual_{frame.filename}"
-        fits.PrimaryHDU(
+        dq = build_dq(
+            original32.shape,
+            detector_bad=detector_mask,
+            no_coverage=~np.isfinite(original32),
+        )
+        write_fits_with_dq(
+            denoised_path,
             denoised32,
-            header=_output_header(
+            _output_header(
                 header, "denoised", frame.split, checkpoint_hash, scale, strength
             ),
-        ).writeto(denoised_path, overwrite=overwrite, output_verify="silentfix")
-        fits.PrimaryHDU(
+            dq,
+            overwrite=overwrite,
+            output_verify="silentfix",
+        )
+        write_fits_with_dq(
+            residual_path,
             residual32,
-            header=_output_header(
+            _output_header(
                 header, "residual", frame.split, checkpoint_hash, scale, strength
             ),
-        ).writeto(residual_path, overwrite=overwrite, output_verify="silentfix")
+            dq,
+            overwrite=overwrite,
+            output_verify="silentfix",
+        )
         target = {
             key: getattr(frame, key)
             for key in ("xc", "yc", "r_ap", "r_in", "r_out")
