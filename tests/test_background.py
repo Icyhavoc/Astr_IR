@@ -67,11 +67,14 @@ def test_background_gradient_is_removed():
     assert abs(result.metrics["unmasked_median_after"]) < 20
 
 
-def test_known_star_is_in_source_mask():
+def test_target_coordinates_do_not_control_source_mask():
     image, _, target = synthetic_image()
     result = subtract_background(image, target=target, config=config())
-    known = make_known_source_mask(image.shape, target, config().known_source_radius_scale)
-    assert np.all(result.source_mask[known])
+    blind = subtract_background(image, config=config())
+    assert not result.known_source_mask.any()
+    assert np.array_equal(result.source_mask, blind.source_mask)
+    assert np.array_equal(result.background_subtracted, blind.background_subtracted)
+    assert result.source_mask[91, 96]
 
 
 def test_aperture_photometry_is_preserved():
@@ -80,6 +83,16 @@ def test_aperture_photometry_is_preserved():
     before = aperture_photometry(image, target)
     after = aperture_photometry(result.background_subtracted, target)
     assert abs((after - before) / before) < 0.01
+
+
+def test_bad_pixel_values_do_not_change_background_or_source_mask():
+    image,_,_=synthetic_image()
+    detector=np.zeros(image.shape,bool); detector[57,63]=True
+    first=subtract_background(image,detector_mask=detector,config=config())
+    corrupted=image.copy(); corrupted[57,63]=1e25
+    second=subtract_background(corrupted,detector_mask=detector,config=config())
+    assert np.array_equal(first.source_mask,second.source_mask)
+    assert np.array_equal(first.background_model,second.background_model)
 
 
 def test_float64_equation_is_exact():
@@ -117,12 +130,13 @@ def test_quality_gate_returns_zero_model_when_improvement_requirement_is_impossi
     assert np.array_equal(result.background_subtracted, result.original)
 
 
-def test_high_snr_unverifiable_photometry_is_rejected():
+def test_catalog_snr_does_not_control_quality_gate():
     image, _, _ = synthetic_image(with_star=False)
     result = subtract_background(image, target={"snr": 100.0}, config=config())
-    assert not result.applied
-    assert result.status == "rejected_photometry_unverifiable"
-    assert np.count_nonzero(result.background_model) == 0
+    blind = subtract_background(image, config=config())
+    assert result.status == blind.status
+    assert not result.metrics["photometry_gate_active"]
+    assert np.array_equal(result.background_model, blind.background_model)
 
 
 def test_fits_outputs_preserve_header_and_float32_equation(tmp_path: Path):

@@ -6,7 +6,7 @@ import textwrap
 import nbformat as nbf
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUT = PROJECT_ROOT / "notebooks" / "flicker" / "01_flicker_noise_correction.ipynb"
 nb = nbf.v4.new_notebook()
 cells = []
@@ -27,8 +27,8 @@ md(
     本 Notebook 按《科创任务安排.docx》中“主要工作”的原始顺序分为九段，并在最后批量生成交付产品。
 
     设计原则：原始 FITS 是唯一科学输入；星源、blindmap 和边缘像元只用于排除条纹估计；输出满足
-    `corrected = original - flicker_model`。老师说明 DQ 是由 blindmap 生成且本任务不需要，因此这里不生成、
-    不读取独立 DQ：直接合并 `DeadBlindMap.tiff` 与 `NoiseBlindMap.tiff` 形成 detector mask。
+    `corrected = original - flicker_model`。合并盲点表与输入 DQ，输出 PRIMARY + DQ。
+    源掩膜完全从图像自动产生，星表和已知目标坐标只允许在流程结束后用于人眼验证。
     """
 )
 
@@ -56,7 +56,7 @@ code(
 
     from astr_ir.flicker.processor import (
         FlickerConfig, correct_flicker, load_detector_mask, load_fits,
-        load_measurement_table, run_batch, target_record_for_file,
+        run_batch,
     )
     from astr_ir.flicker.visualization import (
         plot_background_stage, plot_correction_overview,
@@ -69,19 +69,17 @@ code(
         direction="auto",
         profile_smooth_size=5,
     )
-    RUN_FULL_BATCH = True
-    OVERWRITE_PRODUCTS = True
+    RUN_FULL_BATCH = False  # 默认查看已完成产品；完整重跑用 scripts/maintenance/run_pre_asteris.py。
+    OVERWRITE_PRODUCTS = False
     config
     """
 )
 code(
     """
     detector_mask = load_detector_mask(DATASET_ROOT / "盲点表")
-    measurement_table = load_measurement_table(DATASET_ROOT / "单帧检测总表_新方法.csv")
     sample_path = sorted((DATASET_ROOT / "90000003").glob("*.fits"))[0]
     image, header = load_fits(sample_path)
-    target = target_record_for_file(measurement_table, sample_path.name)
-    result = correct_flicker(image, detector_mask=detector_mask, target=target, config=config)
+    result = correct_flicker(image, detector_mask=detector_mask, config=config)
     print("示例帧:", sample_path.name)
     print("图像尺寸:", image.shape, "EXPOSURE:", header.get("EXPOSURE"))
     """
@@ -115,15 +113,15 @@ md(
     """
     ## 主要工作 2/9：合并星源、DQ 和边缘掩膜
 
-    本数据没有必要再构造 DQ。`detector_mask = DeadBlindMap OR NoiseBlindMap`；再与 CSV 目标星圆形掩膜、
-    自动紧致源掩膜、边缘 24 像素和非有限像元合并。所有这些像元不参与条纹估计，但条纹模型仍可在全图上计算。
+    `detector_mask = DeadBlindMap OR NoiseBlindMap`；再与输入 DQ、自动紧致源掩膜、
+    边缘 24 像素和非有限像元合并。不读取 CSV 目标位置；坏像元不进入平滑与条纹估计。
     """
 )
 code(
     """
     mask_summary = pd.Series({
         "detector blindmap union": result.detector_mask.sum(),
-        "known + auto sources": result.source_mask.sum(),
+        "automatic sources": result.source_mask.sum(),
         "edge": result.edge_mask.sum(),
         "combined (union)": result.combined_mask.sum(),
     }, name="masked pixels")
@@ -237,14 +235,13 @@ md(
     """
     ## 主要工作 9/9：检查恒星测光是否受到影响
 
-    使用 CSV 中 `xc/yc/r_ap/r_in/r_out` 重做圆孔径测光。SNR≥10 的正常恒星启用 1% 质量门；
-    低信噪比帧仍记录测光差异，但不以不稳定的相对百分比否决条纹校正。
+    不启用基于已知目标的测光门限。用随机注入源的输入/输出通量响应做回归测试；
+    不把含条纹的原始孔径流量当成真实流量。星表仅供最终输出的人工核验。
     """
 )
 code(
     """
     display(pd.Series({
-        "input SNR": target["snr"],
         "aperture flux before": result.metrics["photometry_before"],
         "aperture flux after": result.metrics["photometry_after"],
         "relative change [%]": 100 * result.metrics["photometry_change_fraction"],
@@ -280,7 +277,6 @@ code(
 code(
     """
     applied = stats[stats["applied"].astype(bool)]
-    normal_stars = stats[stats["input_snr"] >= config.photometry_gate_snr]
     acceptance = pd.Series({
         "total frames": len(stats),
         "corrected frames": len(applied),
@@ -293,14 +289,10 @@ code(
         "selected size=1 frames": int((applied["selected_profile_smooth_size"] == 1).sum()),
         "max local line increase [DN]": applied["local_max_increase_dn"].max(),
         "max lines degraded over 10 DN": int(applied["local_worse_over_threshold_lines"].max()),
-        "normal-star frames (SNR>=10)": len(normal_stars),
-        "max |normal-star flux change| [%]": 100 * normal_stars["photometry_change_fraction"].abs().max(),
         "max float32 equation error": stats["equation_max_abs_error_float32"].max(),
     })
     display(acceptance.to_frame("value"))
-    fig = plot_photometry_changes(stats, snr_min=config.photometry_gate_snr)
-    save_figure(fig, FIGURE_ROOT / "09_all_frame_photometry.png")
-    plt.show()
+    print("No catalog-conditioned photometry quality gate is used.")
     """
 )
 

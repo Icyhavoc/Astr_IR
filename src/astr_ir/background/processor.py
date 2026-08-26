@@ -30,6 +30,7 @@ from scipy.ndimage import (
 from scipy.signal import fftconvolve
 
 from astr_ir.dq import build_dq, write_fits_with_dq
+from astr_ir.registration import science_valid
 
 
 @dataclass
@@ -49,7 +50,7 @@ class BackgroundConfig:
     tier_min_pixels: tuple[int, ...] = (15, 10, 3, 1)
     tier_dilation_radii: tuple[int, ...] = (24, 16, 10, 6)
     known_source_radius_scale: float = 1.5
-    final_box_size: int = 32
+    final_box_size: int = 64
     final_filter_size: int = 5
     final_sigma_clip: float = 3.0
     final_exclude_percentile: float = 90.0
@@ -297,7 +298,7 @@ def estimate_clipped_ring_background(
     scale = robust_std(residual[valid])
     if not np.isfinite(scale) or scale <= 0:
         scale = float(np.std(residual[valid]))
-    bright = residual > center + bright_sigma * scale
+    bright = (residual > center + bright_sigma * scale) & valid
     valid &= ~bright
     clipped = np.clip(residual - center, -bright_sigma * scale, bright_sigma * scale)
     kernel = _annulus_kernel(inner_radius, width)
@@ -455,6 +456,7 @@ def subtract_background(
     target: Mapping | None = None,
     config: BackgroundConfig | None = None,
 ) -> BackgroundResult:
+    target = None  # Catalog/measurement coordinates must not affect the science path.
     config = config or BackgroundConfig()
     config.validate()
     original = np.asarray(image, dtype=np.float64)
@@ -465,7 +467,7 @@ def subtract_background(
     if detector.shape != original.shape:
         raise ValueError(f"Detector mask {detector.shape} != image {original.shape}")
     edge = make_edge_mask(original.shape, config.edge_width)
-    known = make_known_source_mask(original.shape, target, config.known_source_radius_scale)
+    known = np.zeros_like(original, dtype=bool)
     base = detector | edge | invalid
 
     rough, _ = estimate_grid_background(
@@ -691,7 +693,8 @@ def process_fits_file(
     overwrite: bool = False,
 ) -> tuple[BackgroundResult, dict]:
     image, header = load_fits(input_path)
-    result = subtract_background(image, detector_mask=detector_mask, target=target, config=config)
+    detector_mask = ~science_valid(input_path, image, detector_mask)
+    result = subtract_background(image, detector_mask=detector_mask, target=None, config=config)
     corrected_path, model_path, equation_error = write_fits_products(
         input_path, output_dir, header, result, config, overwrite=overwrite
     )
@@ -731,7 +734,6 @@ def run_batch(
     config = config or BackgroundConfig()
     config.validate()
     detector_mask = load_detector_mask(dataset_root / "盲点表")
-    table = load_measurement_table(dataset_root / "单帧检测总表_新方法.csv")
     if sequences is None:
         sequences = tuple(
             path.name
@@ -746,7 +748,7 @@ def run_batch(
         if limit_per_sequence is not None:
             files = files[:limit_per_sequence]
         for index, path in enumerate(files, start=1):
-            target = target_record_for_file(table, path.name)
+            target = None
             _, row = process_fits_file(
                 path,
                 output_root / sequence,

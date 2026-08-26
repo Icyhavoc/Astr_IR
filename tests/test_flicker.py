@@ -87,13 +87,18 @@ def test_corrected_equals_original_minus_model():
     assert np.array_equal(result.corrected, result.original - result.flicker_model)
 
 
-def test_known_star_is_masked_and_photometry_is_preserved():
+def test_automatic_star_mask_and_photometry_without_target_prior():
     image, target = synthetic_image("row", with_star=True)
     result = correct_flicker(image, target=target, config=config())
-    known_mask = make_known_source_mask(image.shape, target)
-    assert np.all(result.source_mask[known_mask])
-    before = aperture_photometry(result.original, target)
-    after = aperture_photometry(result.corrected, target)
+    blind = correct_flicker(image, config=config())
+    assert np.array_equal(result.source_mask, blind.source_mask)
+    assert np.array_equal(result.corrected, blind.corrected)
+    assert result.source_mask.any()
+    empty, _ = synthetic_image("row", with_star=False)
+    empty_result = correct_flicker(empty, config=config())
+    # Compare injected flux response, not stripe-biased raw aperture flux.
+    before = aperture_photometry(image - empty, target)
+    after = aperture_photometry(result.corrected - empty_result.corrected, target)
     assert abs((after - before) / before) < 0.01
 
 
@@ -101,6 +106,16 @@ def test_manual_direction_is_respected():
     image, _ = synthetic_image("row")
     result = correct_flicker(image, config=config(direction="column", min_direction_score=0.0, min_relative_improvement=0.0))
     assert result.selected_direction == "column"
+
+
+def test_bad_pixel_values_do_not_change_flicker_model_or_source_mask():
+    image,_=synthetic_image('row',with_star=True)
+    detector=np.zeros(image.shape,bool); detector[25,43]=True
+    first=correct_flicker(image,detector_mask=detector,config=config())
+    corrupted=image.copy(); corrupted[25,43]=1e25
+    second=correct_flicker(corrupted,detector_mask=detector,config=config())
+    assert np.array_equal(first.source_mask,second.source_mask)
+    assert np.array_equal(first.flicker_model,second.flicker_model)
 
 
 def test_local_quality_gate_falls_back_to_unsmoothed_profile():
@@ -123,12 +138,12 @@ def test_local_quality_gate_falls_back_to_unsmoothed_profile():
     assert result.metrics["local_gate_passed"]
 
 
-def test_high_snr_unverifiable_photometry_is_rejected():
+def test_catalog_snr_does_not_control_quality_gate():
     image, _ = synthetic_image("row")
     result = correct_flicker(image, target={"snr": 100.0}, config=config())
-    assert not result.applied
-    assert result.status == "rejected_photometry_unverifiable"
-    assert np.count_nonzero(result.flicker_model) == 0
+    blind = correct_flicker(image, config=config())
+    assert result.status == blind.status
+    assert np.array_equal(result.corrected, blind.corrected)
 
 
 def test_profile_degradation_metrics_count_local_regressions():

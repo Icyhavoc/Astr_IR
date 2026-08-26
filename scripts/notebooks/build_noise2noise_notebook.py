@@ -8,7 +8,7 @@ import textwrap
 import nbformat as nbf
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOK = PROJECT_ROOT / "notebooks" / "noise2noise" / "01_noise2noise_self_supervised.ipynb"
 
 
@@ -172,7 +172,7 @@ cells = [
     code(
         """
         completed = subprocess.run(
-            [sys.executable, "scripts/validate_noise2noise.py"],
+            [sys.executable, "scripts/validation/validate_noise2noise.py"],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,

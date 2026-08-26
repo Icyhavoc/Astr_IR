@@ -14,7 +14,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from astropy.io import fits
-from scipy.ndimage import shift
+from astr_ir.registration import masked_shift
 from torch.utils.data import DataLoader
 
 from astr_ir.noise2noise.dataset import build_split_manifest, load_detector_mask
@@ -97,16 +97,7 @@ def _frame_training_samples(
         samples = []
         for row in group.itertuples(index=False):
             image = np.asarray(fits.getdata(input_root / row.product_path), dtype=np.float32)
-            source = circular_source_mask(
-                image.shape,
-                [
-                    (
-                        float(row.track_x),
-                        float(row.track_y),
-                        float(np.nanmax([row.r_out, 3.0 * row.fwhm, 8.0])),
-                    )
-                ],
-            )
+            source = np.zeros(image.shape, dtype=bool)
             estimation = build_noise_estimation_mask(image.shape, detector_mask, source, edge_width)
             values = image[estimation & np.isfinite(image)][::16]
             samples.append(values.astype(np.float64))
@@ -443,22 +434,11 @@ def run_inference(
             with fits.open(input_path, memmap=False) as hdul:
                 original = np.asarray(hdul[0].data, dtype=np.float32)
                 header = hdul[0].header.copy()
-            predicted_native = shift(
+            predicted_native, native_valid, _, _ = masked_shift(
                 prediction_registered[local_index],
+                registered_valid[local_index],
                 (-float(row.alignment_dy), -float(row.alignment_dx)),
-                order=1,
-                mode="constant",
-                cval=np.nan,
-                prefilter=False,
-            ).astype(np.float32)
-            native_valid = shift(
-                registered_valid[local_index].astype(np.float32),
-                (-float(row.alignment_dy), -float(row.alignment_dx)),
-                order=0,
-                mode="constant",
-                cval=0.0,
-                prefilter=False,
-            ) > 0.5
+            )
             denoised = predicted_native
             denoised[~native_valid | ~np.isfinite(denoised)] = original[~native_valid | ~np.isfinite(denoised)]
             residual = (original - denoised).astype(np.float32)

@@ -43,20 +43,24 @@ def _training_psf(
     config: EvaluationConfig,
     output_root: Path,
 ) -> np.ndarray:
-    training = frames.loc[
-        (frames["split"] == "train")
-        & (pd.to_numeric(frames["input_snr"], errors="coerce") >= config.psf_min_training_snr)
-    ].copy()
+    from .blind_joint import inspect_frame
+    # Equal, deterministic per-sequence sample budget, training frames only.
+    # No catalog SNR or target track is allowed to choose the PSF stars.
+    training = frames.loc[frames["split"] == "train"].groupby("sequence",sort=True).head(12).copy()
     if training.empty:
-        raise RuntimeError("No high-SNR training frames are available for empirical PSF construction")
+        raise RuntimeError("No training frames are available for blind empirical PSF construction")
     samples = []
     metadata = []
     for row in training.itertuples(index=False):
         series = pd.Series(row._asdict())
         image = _load_image(input_root, series)
         valid = mask_function(series, image)
-        samples.append((image, valid, float(series["track_x"]), float(series["track_y"])))
-        metadata.append((str(series["frame_id"]), str(series["sequence"])))
+        _,_,_,_,stars,noise = inspect_frame(input_root / str(series["product_path"]), ~valid)
+        for x,y,width,flux in stars:
+            estimated_snr=flux/(2*np.sqrt(np.pi)*width*noise)
+            if estimated_snr >= config.psf_min_training_snr:
+                samples.append((image,valid,float(x),float(y)))
+                metadata.append((str(series["frame_id"]),str(series["sequence"])))
     psf, diagnostics = build_empirical_psf(samples, size=config.psf_size)
     diagnostics["frame_id"] = [metadata[i][0] for i in diagnostics["sample_index"]]
     diagnostics["sequence"] = [metadata[i][1] for i in diagnostics["sample_index"]]
@@ -66,9 +70,7 @@ def _training_psf(
 
 
 def _known_sources(row: pd.Series) -> list[tuple[float, float]]:
-    x, y = row.get("track_x"), row.get("track_y")
-    if pd.notna(x) and pd.notna(y):
-        return [(float(x), float(y))]
+    """Legacy compatibility: exclusion is now image-derived, never catalog-driven."""
     return []
 
 

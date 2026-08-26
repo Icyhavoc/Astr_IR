@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from astr_ir.evaluation import EvaluationConfig, run_mock_source_evaluation
@@ -153,7 +153,7 @@ def main() -> None:
     )
     print(f"validation-selected threshold: {results['selected_threshold']:.2f}")
     print(results["metrics"].to_string(index=False))
-    print("Generate figures in a clean CPU process with scripts/plot_source_evaluation.py")
+    print("Generate figures in a clean CPU process with scripts/evaluation/plot_source_evaluation.py")
 
 
 if __name__ == "__main__":

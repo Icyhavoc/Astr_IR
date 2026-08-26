@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from astr_ir.asteris.catalog_overlay import run_catalog_overlay
@@ -30,4 +30,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -8,7 +8,7 @@ import textwrap
 import nbformat as nbf
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOK = PROJECT_ROOT / "notebooks" / "evaluation" / "01_mock_source_evaluation.ipynb"
 
 
@@ -28,7 +28,7 @@ cells = [
         本 Notebook 只读取已经冻结的评估产品，不重新训练或推理。经验 PSF 仅来自训练集，
         检测阈值仅由验证集选择，最终完备度、纯度、F1、光度和位置误差仅来自测试集。
 
-        完整运行命令：`python scripts/run_source_evaluation.py --model noise2noise --device cuda`。
+        完整运行命令：`python scripts/evaluation/run_source_evaluation.py --model noise2noise --device cuda`。
         """
     ),
     code(
@@ -153,7 +153,7 @@ cells = [
     code(
         """
         completed = subprocess.run(
-            [sys.executable, "scripts/validate_source_evaluation.py"],
+            [sys.executable, "scripts/validation/validate_source_evaluation.py"],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,

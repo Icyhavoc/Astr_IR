@@ -11,7 +11,7 @@ import pandas as pd
 from astropy.io import fits
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from astr_ir.flicker.processor import (  # noqa: E402
@@ -179,8 +179,8 @@ def main() -> None:
     )
     flicker_applied = flicker_stats[flicker_stats["applied"]]
     background_applied = background_stats[background_stats["applied"]]
-    flicker_high_snr = flicker_stats[flicker_stats["input_snr"] >= 10]
-    background_high_snr = background_stats[background_stats["input_snr"] >= 10]
+    if flicker_stats["photometry_gate_active"].any() or background_stats["photometry_gate_active"].any():
+        raise RuntimeError("Blind pipeline must not use catalog-conditioned photometry gates")
 
     print("FITS/equations")
     print(f"  raw frames discovered: {raw_count}")
@@ -196,10 +196,7 @@ def main() -> None:
         f"{100*flicker_applied['relative_reduction'].max():.4f}%"
     )
     print(f"  max high-frequency ratio: {flicker_applied['background_noise_ratio'].max():.9f}")
-    print(
-        "  max |SNR>=10 flux change|: "
-        f"{100*flicker_high_snr['photometry_change_fraction'].abs().max():.4f}%"
-    )
+    print("  catalog-conditioned quality gates: disabled")
     print("Background")
     print(f"  frames/applied: {len(background_stats)}/{len(background_applied)}")
     print(
@@ -209,10 +206,7 @@ def main() -> None:
         f"{100*background_applied['large_scale_reduction'].max():.4f}%"
     )
     print(f"  max high-frequency ratio: {background_applied['high_frequency_noise_ratio'].max():.9f}")
-    print(
-        "  max |SNR>=10 flux change|: "
-        f"{100*background_high_snr['photometry_change_fraction'].abs().max():.4f}%"
-    )
+    print("  catalog-conditioned quality gates: disabled")
 
     if not args.skip_local_profile:
         print("Local flicker-profile degradation")

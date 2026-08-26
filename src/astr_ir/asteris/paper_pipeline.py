@@ -23,7 +23,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from astropy.io import fits
-from scipy.ndimage import shift
+from astr_ir.registration import masked_shift, science_valid
 from scipy.stats import sigmaclip
 from torch.utils.data import DataLoader, Dataset
 
@@ -106,19 +106,9 @@ def _load_registered_stack(
     images, validity = [], []
     for row in rows.itertuples(index=False):
         image = np.asarray(fits.getdata(input_root / row.product_path), dtype=np.float32)
-        valid = np.isfinite(image) & ~detector_mask
+        valid = science_valid(input_root / row.product_path, image, detector_mask)
         dy, dx = float(row.alignment_dy), float(row.alignment_dx)
-        registered = shift(
-            image, (dy, dx), order=1, mode="constant", cval=np.nan, prefilter=False
-        ).astype(np.float32)
-        registered_valid = shift(
-            valid.astype(np.float32),
-            (dy, dx),
-            order=0,
-            mode="constant",
-            cval=0.0,
-            prefilter=False,
-        ) > 0.5
+        registered, registered_valid, _, _ = masked_shift(image, valid, (dy, dx))
         images.append(registered)
         validity.append(registered_valid & np.isfinite(registered))
     return np.stack(images), np.stack(validity)

@@ -1,121 +1,104 @@
-"""Run the notebook-backed ASTERIS preparation, training, inference and evaluation workflow."""
+"""Main ASTERIS entry: paper-style multi-exposure ASTERIS8 (160/400 profiles)."""
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
-import subprocess
 import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from astr_ir.asteris.processor import (
-    AsterisConfig,
-    calibrate_and_finalize,
-    prepare_manifests,
-    run_inference,
-    train_model,
+from astr_ir.asteris.paper_pipeline import (
+    PaperAsterisConfig,
+    prepare_paper_dataset,
+    run_paper_inference,
+    train_paper_model,
 )
+
+
+PROFILES = {
+    "160": ("90000002", "90000003"),
+    "400": ("90000002", "90000003", "90000004", "90000005_1", "90000005_2"),
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile", choices=tuple(PROFILES), required=True)
+    parser.add_argument("--stage", choices=("prepare", "train", "infer", "all"), default="all")
     parser.add_argument(
-        "--stage",
-        choices=("prepare", "train", "infer", "calibrate", "evaluate", "all"),
-        default="all",
+        "--input-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "background"
     )
-    parser.add_argument("--input-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "background")
-    parser.add_argument("--dataset-root", type=Path, default=PROJECT_ROOT / "data" / "raw" / "our_dataset")
-    parser.add_argument("--output-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "asteris")
-    parser.add_argument("--model", choices=("asteris4", "asteris8"), default="asteris4")
-    parser.add_argument("--patch-t", type=int)
-    parser.add_argument("--patch-size", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--train-samples-per-epoch", type=int, default=128)
-    parser.add_argument("--validation-samples", type=int, default=48)
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--f-maps", type=int, default=24)
-    parser.add_argument("--device")
+    parser.add_argument(
+        "--dataset-root", type=Path, default=PROJECT_ROOT / "data" / "raw" / "our_dataset"
+    )
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--checkpoint", type=Path)
-    parser.add_argument("--resume", type=Path)
-    parser.add_argument("--temporal-clip", action="store_true")
+    parser.add_argument("--device")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--patch-size", type=int, default=128)
+    parser.add_argument("--samples-per-sequence", type=int, default=64)
+    parser.add_argument("--validation-samples-per-sequence", type=int, default=16)
+    parser.add_argument("--inference-tile-size", type=int, default=128)
+    parser.add_argument("--inference-overlap", type=int, default=16)
+    parser.add_argument("--random-initialization", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--evaluation-sequences",
+        nargs="+",
+        default=["90000002", "90000003"],
+        help="Held-out sequences used for the primary 160-vs-400 comparison.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    patch_t = args.patch_t or (4 if args.model == "asteris4" else 8)
-    config = AsterisConfig(
-        model=args.model,
-        patch_t=patch_t,
-        patch_size=args.patch_size,
-        epochs=args.epochs,
-        train_samples_per_epoch=args.train_samples_per_epoch,
-        validation_samples=args.validation_samples,
-        batch_size=args.batch_size,
-        f_maps=args.f_maps,
-        temporal_clip=args.temporal_clip,
+    sequences = PROFILES[args.profile]
+    output_root = args.output_root or (
+        PROJECT_ROOT / "data" / "processed" / f"asteris_paper_{args.profile}"
     )
-    checkpoint = args.checkpoint or args.output_root / "checkpoints" / "best_checkpoint.pt"
+    config = replace(
+        PaperAsterisConfig(),
+        epochs=args.epochs,
+        patch_size=args.patch_size,
+        samples_per_sequence=args.samples_per_sequence,
+        validation_samples_per_sequence=args.validation_samples_per_sequence,
+        inference_tile_size=args.inference_tile_size,
+        inference_overlap=args.inference_overlap,
+        initialize_from_official=not args.random_initialization,
+    )
     if args.stage in {"prepare", "all"}:
-        split, windows, stats = prepare_manifests(
-            args.input_root, args.dataset_root, args.output_root, config=config
-        )
-        print(split.groupby(["sequence", "split"]).size().to_string())
-        print(windows.loc[windows["usable"]].groupby(["sequence", "split"]).size().to_string())
-        print("train-only normalization", stats)
-    if args.stage in {"train", "all"}:
-        checkpoint, history = train_model(
+        split, stacks = prepare_paper_dataset(
             args.input_root,
             args.dataset_root,
-            args.output_root,
+            output_root,
+            sequences=sequences,
             config=config,
-            device=args.device,
-            resume=args.resume,
         )
+        print("frame split")
+        print(split.groupby(["sequence", "split"]).size().to_string())
+        print("paper stacks")
+        print(stacks[["sequence", "split", "frames"]].to_string(index=False))
+    checkpoint = args.checkpoint or output_root / "checkpoints" / "best_checkpoint.pt"
+    if args.stage in {"train", "all"}:
+        checkpoint, history = train_paper_model(output_root, config=config, device=args.device)
         print(f"best checkpoint: {checkpoint}")
         print(history.tail().to_string(index=False))
     if args.stage in {"infer", "all"}:
-        statistics = run_inference(
+        stats = run_paper_inference(
             args.input_root,
             args.dataset_root,
-            args.output_root,
+            output_root,
             checkpoint,
-            config=config,
+            evaluation_sequences=args.evaluation_sequences,
             device=args.device,
             overwrite=args.overwrite,
         )
-        print(statistics.groupby(["sequence", "split"]).size().to_string())
-    if args.stage in {"calibrate", "all"}:
-        strength, calibration, statistics = calibrate_and_finalize(
-            args.input_root,
-            args.dataset_root,
-            args.output_root,
-            checkpoint,
-            config=config,
-            overwrite=args.overwrite,
-        )
-        print(f"selected validation-calibrated ASTERIS strength: {strength:.2f}")
-        print(calibration.to_string(index=False))
-        print(statistics.groupby(["sequence", "split"]).size().to_string())
-    if args.stage in {"evaluate", "all"}:
-        command = [
-            sys.executable,
-            "scripts/run_source_evaluation.py",
-            "--model",
-            "asteris",
-            "--model-output-root",
-            str(args.output_root),
-            "--evaluation-root",
-            str(PROJECT_ROOT / "data" / "processed" / "evaluation" / "asteris"),
-        ]
-        if args.device:
-            command.extend(["--device", args.device])
-        subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+        print(stats.to_string(index=False))
 
 
 if __name__ == "__main__":

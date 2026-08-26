@@ -74,13 +74,13 @@ SNR=2–3的已恢复源存在明显正流量偏差，主要来自只选择越�
 cd <project-root>
 
 # GPU推理和科学统计
-python scripts/run_source_evaluation.py --model noise2noise --device cuda
+python scripts/evaluation/run_source_evaluation.py --model noise2noise --device cuda
 
 # 在不导入GPU模型的干净CPU进程中绘图
-python scripts/plot_source_evaluation.py
+python scripts/evaluation/plot_source_evaluation.py
 
 # 严格检查数据隔离、计数、一一匹配、PSF和SNR=5质量门
-python scripts/validate_source_evaluation.py
+python scripts/validation/validate_source_evaluation.py
 ```
 
 数据输出位于：

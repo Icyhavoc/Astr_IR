@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 from astropy.io import fits
-from scipy.ndimage import shift
+from astr_ir.registration import masked_shift, science_valid
 from torch.utils.data import Dataset
 
 from astr_ir.noise2noise.dataset import load_detector_mask
@@ -149,19 +149,18 @@ def load_registered_stack(
     images, validity = [], []
     for row in rows.itertuples(index=False):
         image = np.asarray(fits.getdata(input_root / row.product_path), dtype=np.float32)
-        valid = ~np.asarray(detector_mask, bool) & np.isfinite(image)
+        valid = science_valid(input_root / row.product_path, image, detector_mask)
         dy, dx = float(row.alignment_dy), float(row.alignment_dx)
-        aligned = shift(image, (dy, dx), order=1, mode="constant", cval=np.nan, prefilter=False)
-        aligned_valid = shift(
-            valid.astype(np.float32), (dy, dx), order=0, mode="constant", cval=0.0, prefilter=False
-        ) > 0.5
+        aligned, aligned_valid, _, _ = masked_shift(image, valid, (dy, dx))
         images.append(aligned)
         validity.append(aligned_valid)
     stack = np.stack(images)
-    source_mask = _source_mask_for_rows(rows, stack.shape[1:])
+    # No catalog or known-target protection. Detector masks have already moved
+    # with each exposure and must not be applied again in reference coordinates.
+    source_mask = np.zeros(stack.shape[1:], dtype=bool)
     clipping = sigma_clip_stack(
         stack,
-        detector_mask,
+        np.zeros(stack.shape[1:], dtype=bool),
         source_mask,
         sigma=sigma,
         edge_width=edge_width,

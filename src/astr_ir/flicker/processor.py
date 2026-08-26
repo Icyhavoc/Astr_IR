@@ -27,6 +27,7 @@ from scipy.ndimage import (
 )
 
 from astr_ir.dq import build_dq, write_fits_with_dq
+from astr_ir.registration import masked_gaussian, science_valid
 
 
 Direction = Literal["auto", "row", "column"]
@@ -219,7 +220,7 @@ def make_auto_source_mask(
 ) -> np.ndarray:
     """Detect compact positive sources in a small-scale high-pass image."""
 
-    smooth = gaussian_filter(image, sigma=3.0, mode="reflect")
+    smooth = masked_gaussian(image, ~base_mask, sigma=3.0)
     highpass = image - smooth
     sigma = robust_std(highpass[~base_mask])
     if not np.isfinite(sigma) or sigma <= 0:
@@ -247,7 +248,7 @@ def combine_masks(
             raise ValueError(f"Detector mask {detector.shape} != image {shape}")
     edge = make_edge_mask(shape, config.edge_width)
     invalid = ~np.isfinite(image)
-    known = make_known_source_mask(shape, target, config.known_source_radius_scale)
+    known = np.zeros(shape, dtype=bool)  # Catalog coordinates are evaluation-only.
     preliminary = detector | edge | invalid | known
     automatic = make_auto_source_mask(
         image,
@@ -445,7 +446,7 @@ def aperture_photometry(image: np.ndarray, target: Mapping | None) -> float:
 
 
 def _background_noise(image: np.ndarray, mask: np.ndarray) -> float:
-    highpass = image - gaussian_filter(image, sigma=2.0, mode="reflect")
+    highpass = image - masked_gaussian(image, ~mask, sigma=2.0)
     return robust_std(highpass[~mask])
 
 
@@ -457,6 +458,7 @@ def correct_flicker(
 ) -> CorrectionResult:
     """Run the complete correction with weak-signal and validation gates."""
 
+    target = None  # Legacy argument accepted, never used for masking or quality gates.
     config = config or FlickerConfig()
     config.validate()
     original = np.asarray(image, dtype=np.float64)
@@ -745,7 +747,8 @@ def process_fits_file(
     overwrite: bool = False,
 ) -> tuple[CorrectionResult, dict]:
     image, header = load_fits(input_path)
-    result = correct_flicker(image, detector_mask=detector_mask, target=target, config=config)
+    detector_mask = ~science_valid(input_path, image, detector_mask)
+    result = correct_flicker(image, detector_mask=detector_mask, target=None, config=config)
     corrected_path, model_path, equation_error = write_fits_products(
         input_path, output_dir, header, result, overwrite=overwrite
     )
@@ -781,7 +784,6 @@ def run_batch(
     output_root = Path(output_root).resolve()
     config = config or FlickerConfig()
     detector_mask = load_detector_mask(dataset_root / "盲点表")
-    table = load_measurement_table(dataset_root / "单帧检测总表_新方法.csv")
     if sequences is None:
         sequences = tuple(
             path.name
@@ -797,7 +799,7 @@ def run_batch(
             files = files[:limit_per_sequence]
         sequence_output = output_root / sequence
         for index, path in enumerate(files, start=1):
-            target = target_record_for_file(table, path.name)
+            target = None
             _, row = process_fits_file(
                 path,
                 sequence_output,

@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from scripts.validate_products import equation_max_error, validate_inventory
+from scripts.validation.validate_products import equation_max_error, validate_inventory
 
 
 def test_equation_check_rejects_finite_mask_mismatch():

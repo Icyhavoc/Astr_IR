@@ -31,10 +31,7 @@ data/raw/our_dataset/
 data/processed/
 
 # Generated diagnostics
-figures/flicker_output/
-figures/background_output/
-figures/noise2noise_output/
-figures/evaluation_output/
+figures/*_output/
 
 # Local logs and scratch files
 *.log

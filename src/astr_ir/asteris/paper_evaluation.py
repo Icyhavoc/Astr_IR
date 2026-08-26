@@ -149,18 +149,12 @@ def run_paper_mock_evaluation(
             base_input, _, base_valid, _ = denoise_registered_exposures(
                 physical, valid, model, model_config, device=device_name
             )
-            source_available = bool(group.source_measurement_available.astype(bool).any())
-            known = (
-                [(float(group.reference_x.iloc[0]), float(group.reference_y.iloc[0]))]
-                if source_available
-                else []
-            )
             evaluation_mask, _ = make_evaluation_mask(
                 base_input,
                 base_valid,
                 psf,
                 science.edge_width,
-                known_sources=known,
+                known_sources=[],
                 source_exclusion_radius=science.source_exclusion_radius,
             )
             for repeat in range(config.repeats):

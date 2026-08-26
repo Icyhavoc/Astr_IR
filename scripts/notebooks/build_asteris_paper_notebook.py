@@ -6,8 +6,8 @@ import textwrap
 import nbformat as nbf
 
 
-ROOT = Path(__file__).resolve().parents[1]
-NOTEBOOK = ROOT / "notebooks" / "asteris" / "02_asteris8_paper_160_vs_400.ipynb"
+ROOT = Path(__file__).resolve().parents[2]
+NOTEBOOK = ROOT / "notebooks" / "asteris" / "01_asteris8_paper_160_vs_400.ipynb"
 
 
 def code(source: str):
@@ -25,6 +25,10 @@ nb["cells"] = [
         """
         # ASTERIS8：论文式多曝光训练，160帧与400帧对比
 
+        **2026-08-26 注意：400 帧的 1/f 与背景已切换为全盲流程。已有权重、prepared stacks 和下方历史输出仍属于旧版预处理。**
+        本次没有训练；新预处理/联合检测入口为 `notebooks/evaluation/02_blind_pre_asteris_pipeline.ipynb`。
+        下一次模型实验应另建输出目录，重新 prepare/train，不能把新图像与旧缓存/坐标清单混用。
+
         本 Notebook 是更新后的主实验入口。它使用原作者 ASTERIS8 网络和官方初始化，
         将16张独立曝光交错为8帧输入/8帧目标，执行时间轴与全局3σ裁剪、论文损失、
         八帧时间合成和真正的多曝光盲伪源注入。旧的单图复制评估和 α 混合不再用于本实验。
@@ -41,9 +45,8 @@ nb["cells"] = [
         import pandas as pd
         import torch
 
-        PROJECT_ROOT = Path.cwd()
-        if PROJECT_ROOT.name == "asteris":
-            PROJECT_ROOT = PROJECT_ROOT.parents[1]
+        start = Path.cwd().resolve()
+        PROJECT_ROOT = next(path for path in (start, *start.parents) if (path / "src" / "astr_ir").is_dir())
         sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
         from astr_ir.asteris.paper_pipeline import (

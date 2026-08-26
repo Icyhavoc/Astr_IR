@@ -8,7 +8,7 @@ from textwrap import dedent
 import nbformat as nbf
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOK = PROJECT_ROOT / "notebooks" / "background" / "01_background_subtraction.ipynb"
 
 
@@ -63,8 +63,7 @@ cells = [
 
         from astr_ir.background.processor import (
             BackgroundConfig, discover_input_files, load_detector_mask,
-            load_fits, load_measurement_table, run_batch,
-            subtract_background, target_record_for_file,
+            load_fits, run_batch, subtract_background,
         )
         from astr_ir.background.visualization import (
             plot_background_histogram, plot_background_stages,
@@ -81,7 +80,7 @@ cells = [
             rough_box_size=100,
             ring_inner_radius=80,
             ring_width=4,
-            final_box_size=32,
+            final_box_size=64,
             final_filter_size=5,
         )
         config
@@ -90,24 +89,23 @@ cells = [
     md("## 1. 输入清单：只读取 1/f 校正科学图"),
     code(
         """
-        inventory = {sequence: discover_input_files(INPUT_ROOT, sequence) for sequence in ("90000002", "90000003")}
-        model_files = sorted(INPUT_ROOT.glob("9000000?/flicker_model_*.fits"))
+        inventory = {p.name: discover_input_files(INPUT_ROOT, p.name) for p in sorted(INPUT_ROOT.iterdir()) if p.is_dir() and any(p.glob("flicker_corrected_*.fits"))}
+        model_files = sorted(INPUT_ROOT.glob("*/flicker_model_*.fits"))
         print({key: len(value) for key, value in inventory.items()})
         print("excluded flicker models:", len(model_files))
-        assert sum(map(len, inventory.values())) == 160
+        expected_frames = sum(map(len, inventory.values()))
+        assert expected_frames > 0
         assert all(path.name.startswith("flicker_corrected_") for files in inventory.values() for path in files)
         """
     ),
-    md("## 2. 读取盲点并选择高 SNR 示例帧"),
+    md("## 2. 读取盲点，按文件顺序选择示例帧（不使用星表）"),
     code(
         """
         detector_mask = load_detector_mask(DATASET_ROOT / "盲点表")
-        measurements = load_measurement_table(DATASET_ROOT / "单帧检测总表_新方法.csv")
         sample_path = inventory["90000003"][0]
         sample_image, sample_header = load_fits(sample_path)
-        sample_target = target_record_for_file(measurements, sample_path.name)
         print(sample_path.name, sample_image.shape, sample_image.dtype)
-        print("blind-map pixels:", int(detector_mask.sum()), "target SNR:", sample_target.get("snr"))
+        print("blind-map pixels:", int(detector_mask.sum()))
         """
     ),
     md(
@@ -123,7 +121,7 @@ cells = [
     code(
         """
         sample_result = subtract_background(
-            sample_image, detector_mask=detector_mask, target=sample_target, config=config
+            sample_image, detector_mask=detector_mask, config=config
         )
         fig = plot_background_stages(sample_result)
         save_figure(fig, FIGURE_ROOT / "01_background_stages.png")
@@ -171,19 +169,16 @@ cells = [
         plt.show()
         """
     ),
-    md("## 8. 全量处理 160 帧"),
+    md("## 8. 全量处理（自动发现所有序列，当前 400 帧）"),
     code(
         """
         statistics_path = OUTPUT_ROOT / "background_statistics.csv"
-        existing_products = sorted(OUTPUT_ROOT.glob("9000000?/*.fits"))
-        if statistics_path.exists() and len(existing_products) == 320:
+        existing_products = sorted(OUTPUT_ROOT.glob("*/*.fits"))
+        if statistics_path.exists() and len(existing_products) == 2 * expected_frames:
             stats = pd.read_csv(statistics_path, encoding="utf-8-sig", dtype={"sequence": str})
             print("Reusing verified products in data/processed/background/.")
         else:
-            stats = run_batch(
-                INPUT_ROOT, DATASET_ROOT, OUTPUT_ROOT,
-                config=config, overwrite=True,
-            )
+            raise RuntimeError("请先运行 scripts/maintenance/run_pre_asteris.py；它会备份首末旧帧后重跑两个阶段。")
         print(stats.groupby(["sequence", "status"]).size().to_string())
         print("frames:", len(stats))
         """
@@ -198,24 +193,20 @@ cells = [
             "mask fraction": applied["mask_fraction"].describe(percentiles=[0.5]),
         })
         display(summary)
-        high_snr = stats[stats["input_snr"] >= config.photometry_gate_snr]
-        print("high-SNR frames:", len(high_snr))
-        print("max |final flux change|:", high_snr["photometry_change_fraction"].abs().max())
+        print("catalog used: False; known-target photometry gates: disabled")
         """
     ),
     code(
         """
-        fig = plot_photometry_changes(stats, config.photometry_gate_snr)
-        save_figure(fig, FIGURE_ROOT / "06_all_frame_photometry.png")
-        plt.show()
+        print("随机注入通量响应测试见 tests/test_blind_joint.py 和 tests/test_flicker.py。")
         """
     ),
     md("## 10. FITS 头、文件选择与输出公式检查"),
     code(
         """
-        output_fits = sorted(OUTPUT_ROOT.glob("9000000?/*.fits"))
+        output_fits = sorted(OUTPUT_ROOT.glob("*/*.fits"))
         print("output FITS:", len(output_fits))
-        assert len(output_fits) == 320
+        assert len(output_fits) == 2 * expected_frames
         assert not any("flicker_model" in str(path) for path in stats["input_filename"])
         for path in output_fits:
             with fits.open(path, memmap=False) as hdul:
@@ -247,7 +238,8 @@ cells = [
         ## 结论
 
         本流程只读取 1/f 校正科学图，使用 blindmap 与重源掩膜拟合平滑二维背景；质量门同时约束
-        64 像素尺度起伏、高频噪声和高 SNR 目标星孔径流量；高 SNR 测光无法验证时同样拒绝候选。
+        64 像素尺度起伏和高频噪声；不再通过已知目标位置保护源或控制处理。
+        背景网格默认 64 像素，源掩膜完全由图像自动产生，星表仅用于最终人工核验。
         未通过质量门的帧输出原图 float32
         副本和零背景模型，并在统计表中记录原因。
         """
