@@ -17,9 +17,9 @@ from astropy.io import fits
 from astr_ir.registration import masked_shift
 from torch.utils.data import DataLoader
 
-from astr_ir.noise2noise.dataset import build_split_manifest, load_detector_mask
+from astr_ir.split_manifest import build_split_manifest
 from astr_ir.noise2noise.processor import aperture_flux_snr, neighbor_difference_noise
-from astr_ir.dq import build_dq, read_dq, write_fits_with_dq
+from astr_ir.dq import build_dq, load_detector_mask, read_dq, write_fits_with_dq
 
 from .dataset import (
     AsterisPatchDataset,

@@ -24,13 +24,13 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from astropy.io import fits
-from astr_ir.registration import masked_shift, science_valid
+from astr_ir.registration import load_science, masked_shift
 from scipy.stats import sigmaclip
 from torch.utils.data import DataLoader, Dataset
 
-from astr_ir.noise2noise.dataset import build_split_manifest, load_detector_mask
-from astr_ir.noise2noise.processor import neighbor_difference_noise
-from astr_ir.dq import build_dq, write_fits_with_dq
+from astr_ir.split_manifest import build_split_manifest
+from astr_ir.background.processor import neighbor_difference_noise
+from astr_ir.dq import build_dq, load_detector_mask, write_fits_with_dq
 
 from .dataset import relabel_manifest_for_patch_t
 from .inference import infer_volume
@@ -106,8 +106,7 @@ def _load_registered_stack(
 ) -> tuple[np.ndarray, np.ndarray]:
     images, validity = [], []
     for row in rows.itertuples(index=False):
-        image = np.asarray(fits.getdata(input_root / row.product_path), dtype=np.float32)
-        valid = science_valid(input_root / row.product_path, image, detector_mask)
+        image, _, valid, _ = load_science(input_root / row.product_path, detector_mask)
         dy, dx = float(row.alignment_dy), float(row.alignment_dx)
         registered, registered_valid, _, _ = masked_shift(image, valid, (dy, dx))
         images.append(registered)
@@ -202,9 +201,11 @@ def prepare_paper_dataset(
 
     config.validate()
     input_root, dataset_root, output_root = Path(input_root), Path(dataset_root), Path(output_root)
+    if output_root.exists() and any(output_root.iterdir()):
+        raise FileExistsError(f"Prepare requires a fresh output root: {output_root}")
     manifest_root = output_root / "manifests"
-    manifest_root.mkdir(parents=True, exist_ok=True)
     if frozen_manifest is None:
+        manifest_root.mkdir(parents=True, exist_ok=True)
         split = build_split_manifest(
             input_root,
             dataset_root,
@@ -230,11 +231,12 @@ def prepare_paper_dataset(
             resolved = (input_root / value).resolve()
             if not resolved.is_relative_to(input_root.resolve()) or not resolved.is_file():
                 raise ValueError('Missing or unsafe frozen product path')
+        manifest_root.mkdir(parents=True, exist_ok=True)
     split.to_csv(manifest_root / "split_manifest.csv", index=False, encoding="utf-8-sig")
     detector_mask = load_detector_mask(dataset_root)
     stack_rows = []
     for (sequence, split_name), group in split.groupby(["sequence", "split"], sort=True):
-        if split_name == "guard":
+        if split_name in {"guard", "test"}:
             continue
         group = group.sort_values("frame_index").reset_index(drop=True)
         physical, valid = _load_registered_stack(group, input_root, detector_mask)
@@ -407,6 +409,13 @@ def train_paper_model(
 ) -> tuple[Path, pd.DataFrame]:
     config.validate()
     output_root = Path(output_root)
+    checkpoint_root = output_root / "checkpoints"
+    if checkpoint_root.exists() and any(checkpoint_root.iterdir()):
+        raise FileExistsError(f"Training requires fresh checkpoints: {checkpoint_root}")
+    prepared = json.loads((output_root / "manifests" / "paper_config.json").read_text(encoding="utf-8"))
+    for key in ("scale_factor", "temporal_sigma", "global_sigma", "mse_select"):
+        if prepared[key] != getattr(config, key):
+            raise ValueError(f"Prepared stack configuration differs from training: {key}")
     stacks = pd.read_csv(
         output_root / "manifests" / "paper_stack_manifest.csv",
         encoding="utf-8-sig",
@@ -527,6 +536,7 @@ def train_paper_model(
             "optimizer_state": optimizer.state_dict(),
             "scheduler_state": scheduler.state_dict(),
             "config": asdict(config),
+            "split_manifest_sha256": _checkpoint_hash(output_root / "manifests" / "split_manifest.csv"),
             "upstream_source_sha256": upstream_source_sha256("asteris8"),
             "official_initialization": config.official_checkpoint if config.initialize_from_official else None,
             "best_validation_loss": min(best_loss, float(validation_mean[0])),
@@ -659,6 +669,8 @@ def run_paper_inference(
 
     input_root, dataset_root, output_root = Path(input_root), Path(dataset_root), Path(output_root)
     checkpoint_path = Path(checkpoint_path)
+    if (output_root / "paper_coadd_statistics.csv").exists() and not overwrite:
+        raise FileExistsError(output_root / "paper_coadd_statistics.csv")
     split = pd.read_csv(
         output_root / "manifests" / "split_manifest.csv",
         encoding="utf-8-sig",
@@ -667,7 +679,9 @@ def run_paper_inference(
     if evaluation_sequences is not None:
         split = split.loc[split.sequence.isin(map(str, evaluation_sequences))]
     detector_mask = load_detector_mask(dataset_root)
-    model, _, config = load_paper_model(checkpoint_path, device=device)
+    model, checkpoint, config = load_paper_model(checkpoint_path, device=device)
+    if checkpoint.get("split_manifest_sha256") != _checkpoint_hash(output_root / "manifests" / "split_manifest.csv"):
+        raise ValueError("Checkpoint and split manifest differ; use the original frozen run")
     device_obj = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     checkpoint_hash = _checkpoint_hash(checkpoint_path)
     records = []

@@ -5,7 +5,7 @@
 - Notebook：`notebooks/asteris/01_asteris8_paper_160_vs_400.ipynb`
 - CLI：`scripts/run_asteris.py`（原 `run_asteris_paper.py`）
 - 实现：`src/astr_ir/asteris/paper_pipeline.py`
-- 输出：`data/processed/asteris_paper_{160,400}/`
+- 输出：新实验在 `data/processed/asteris_paper_<profile>_<run>/` 建独立目录
 
 旧 ASTERIS4/α 混合 Notebook 和 CLI 已移除；其权重、FITS 和评估表已移至
 `D:/Astr_IR/_cleanup_backup/assets_20260826/data/processed/asteris/` 及同层 `evaluation/asteris/`。
@@ -40,7 +40,7 @@ AdamW：学习率 `1.5e-4`、weight decay `1e-4`，余弦 `T_max=2,000,000`。
 
 ## 命令
 
-以下 prepare 示例只构建数据，不训练；另建输出目录以免覆盖历史实验：
+以下 prepare 示例只构建 train/validation stack，不训练，也不物化测试 stack。输出目录必须为空：
 
 ```powershell
 python scripts/run_asteris.py --profile 160 --stage prepare --output-root data/processed/asteris_blind_160
@@ -48,7 +48,7 @@ python scripts/run_asteris.py --profile 400 --stage prepare --output-root data/p
 ```
 
 训练、推理使用同一输出目录，分别指定 `--stage train`、`--stage infer`。
-当前背景参数仍需验证，本次整理未执行上述命令。
+checkpoint 在推理时核对冻结 split manifest 的 SHA-256。当前背景参数仍需验证，本次未运行 prepare、训练或推理。
 辅助的多曝光伪源评估、160/400 汇总、星表标注都在 `scripts/evaluation/`。
 
 ## 已有历史结果（旧预处理）
@@ -65,8 +65,8 @@ python scripts/run_asteris.py --profile 400 --stage prepare --output-root data/p
 | SNR 5 purity | 0.5000 | 0.5714 |
 
 旧实验增加训练帧数改善了噪声及部分纯度指标，但没有一致提升临界弱源检出率。
-原始结果在 `data/processed/evaluation/asteris_paper_comparison/`，Notebook 历史输出未清空。
+原始结果已归档到 `D:/Astr_IR/_cleanup_backup/interface_optimization_20261009/processed/evaluation/asteris_paper_comparison/`，Notebook 历史输出未清空。
 
-2026-08-26 的 400 帧 1/f 与背景已改为全盲流程，以上权重、prepared stacks 和 coadd 尚未随之重做。
+以上权重、prepared stacks 和 coadd 也已归档，尚未用当前全盲预处理重做。
 新实验必须重新 prepare/train，并使用同一版上游输入及等曝光评估；不能直接复用历史结果宣称提升。
 背景起伏回归等限制见 [全盲流程记录](evaluation/blind_pipeline.md)。

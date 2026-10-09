@@ -3,20 +3,20 @@
 主入口：`notebooks/noise2noise/01_noise2noise_self_supervised.ipynb`；
 CLI：`scripts/run_noise2noise.py`；实现：`src/astr_ir/noise2noise/`。
 
-## 输入、输出与保留数据
+## 输入、输出与当前状态
 
-只读取 `background_subtracted_*.fits`。现有历史实验使用前两个序列共 160 帧；
-新的 manifest 构建器会发现全部已完成 background 的序列。
+只读取 `background_subtracted_*.fits`。manifest 构建器会发现全部已完成 background 的序列。
+当前 `data/processed/` 已清空；旧结果位于
+`D:/Astr_IR/_cleanup_backup/interface_optimization_20261009/processed/`，不能当作新输入版本的结果。
 
-`data/processed/noise2noise/` 保留：
+新实验的 `data/processed/noise2noise_<run>/` 将包含：
 
 - `checkpoints/`：best/last 权重和训练历史。
-- `manifests/`：帧切分、帧对、归一化、历史强度标定。
-- `denoised/`、`residual/`：各 160 张科学与残差 FITS。
+- `manifests/`：帧切分、帧对、归一化。
+- `denoised/`、`residual/`：逐帧科学与残差 FITS。
 - `noise2noise_statistics.csv`：逐帧结果。
 
-当前采用的伪源评估在 `data/processed/evaluation/noise2noise/`。
-旧模型根目录的两张早期评估表及对应旧图已归档，避免两套不同格式被误认为同一结果。
+旧评估也一并归档。新实验须在冻结参数后另做全盲注入评估。
 
 ## 当前代码的数据与模型约定
 
@@ -29,22 +29,22 @@ CLI：`scripts/run_noise2noise.py`；实现：`src/astr_ir/noise2noise/`。
 
 科学输出：`noise2noise_denoised = background_subtracted_input - noise2noise_residual`。
 
-## 尚未完成的全盲适配
+## 固定强度与科学限制
 
-CLI 的 infer/all 仍调用历史目标测光强度标定，不能直接用于新的全盲 manifest。
-本次仅清理文件和文档，没有修改这一算法；不要运行旧 all 命令后把结果当作新全盲基线。
+主 CLI 要求显式 `--stage`。`infer` 使用 `--strength` 固定去噪强度（默认 1.0），不再调用历史高 SNR 星源测光标定；checkpoint 必须与冻结的 split manifest 一致。
+新结果写入空白输出目录，上游 DQ 保留在科学输出中。
 
-现有权重和 FITS 对应旧预处理。历史标定选择 α=0.23，测试相邻像元噪声比中位数约 0.7816；
-这些是历史记录，不代表新 400 帧数据上的性能。
-当前 background 已更新，因此历史科学公式校验不能直接与新 background 混用。
+历史标定曾选择 α=0.23，旧测试相邻像元噪声比中位数约 0.7816；这些仅是归档记录。
+固定强度 1.0 的通量传递、完整率和误检率尚未在当前输入上验证，不能宣称弱源检出改善。
 
 ## 检查与评估
 
 ```powershell
 python scripts/run_noise2noise.py --help
 python -m pytest -q tests/test_noise2noise.py
+python scripts/run_noise2noise.py --stage prepare --output-root data/processed/noise2noise_<run>
 ```
 
 伪源方法、保存表和绘图说明见 [独立评估](evaluation/source_evaluation.md)；
 新旧数据边界见 [全盲记录](evaluation/blind_pipeline.md)。
-保留 Notebook 的已执行输出供查看，本次未重新执行训练、标定或推理。
+Notebook 的旧执行输出保留供追溯，本次未重新执行训练或推理。

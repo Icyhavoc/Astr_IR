@@ -1,5 +1,7 @@
 # Blind pre-ASTERIS pipeline, 2026-08-26
 
+> 2026-10-09 状态：本文记录的是已归档的历史实验。文中的 `data/processed/...` 与 `figures/...` 结果已移至 `D:/Astr_IR/_cleanup_backup/interface_optimization_20261009/` 对应子目录；当前工作目录没有这些结果。数字不能作为重跑后的科学结论。
+
 V3 weak-source experiments are now implemented in notebook section 6; see [implementation and boundaries](weak_source_v3.md).
 All new run switches default to false. The historical results below were not rerun or overwritten by this code update.
 

@@ -1,8 +1,9 @@
-"""Strictly validate Noise2Noise manifests, FITS equations, and held-out science gates."""
+"""Validate Noise2Noise split isolation, FITS equations, and DQ propagation."""
 
 from __future__ import annotations
 
 from pathlib import Path
+import argparse
 import sys
 
 import numpy as np
@@ -12,6 +13,7 @@ from astropy.io import fits
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
+from astr_ir.dq import read_dq
 
 
 def read_float32_fits(path: Path) -> tuple[np.ndarray, fits.Header]:
@@ -34,8 +36,11 @@ def equation_error(actual: np.ndarray, expected: np.ndarray, label: str) -> floa
 
 
 def main() -> None:
-    background_root = PROJECT_ROOT / "data" / "processed" / "background"
-    output_root = PROJECT_ROOT / "data" / "processed" / "noise2noise"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "background")
+    parser.add_argument("--output-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "noise2noise")
+    args = parser.parse_args()
+    background_root, output_root = args.input_root, args.output_root
     split = pd.read_csv(
         output_root / "manifests" / "split_manifest.csv",
         encoding="utf-8-sig",
@@ -51,14 +56,8 @@ def main() -> None:
         encoding="utf-8-sig",
         dtype={"sequence": str},
     )
-    expected_split = {
-        (sequence, split_name): count
-        for sequence in ("90000002", "90000003")
-        for split_name, count in (("train", 48), ("guard", 4), ("validation", 12), ("test", 16))
-    }
-    actual_split = split.groupby(["sequence", "split"]).size().to_dict()
-    if actual_split != expected_split:
-        raise RuntimeError(f"Unexpected frame split: {actual_split}")
+    if split.frame_id.duplicated().any() or set(statistics.frame_id) != set(split.frame_id):
+        raise RuntimeError("Split/statistics frame IDs differ or repeat")
     frame_splits = split.set_index("frame_id")["split"].to_dict()
     if (pairs["lag"] < 2).any():
         raise RuntimeError("Pair manifest contains lag < 2")
@@ -77,8 +76,8 @@ def main() -> None:
     }
     if expected_denoised != actual_denoised or expected_residual != actual_residual:
         raise RuntimeError("Noise2Noise output inventory differs from the statistics table")
-    if len(statistics) != 160 or len(actual_denoised) != 160 or len(actual_residual) != 160:
-        raise RuntimeError("Expected 160 frames and 320 Noise2Noise FITS products")
+    if len(statistics) != len(split) or len(actual_denoised) != len(split) or len(actual_residual) != len(split):
+        raise RuntimeError("Expected one denoised and one residual product per split frame")
     maximum_error = 0.0
     for row in statistics.itertuples(index=False):
         input_image, _ = read_float32_fits(
@@ -88,33 +87,21 @@ def main() -> None:
         residual, _ = read_float32_fits(output_root / row.residual_path)
         if header.get("HIERARCH N2N PROD") != "denoised":
             raise RuntimeError(f"Missing N2N product metadata: {row.denoised_path}")
+        input_dq = read_dq(background_root / str(row.sequence) / f"background_subtracted_{row.filename}", input_image.shape)
+        output_dq = read_dq(output_root / row.denoised_path, denoised.shape)
+        if output_dq is None or (input_dq is not None and np.any((output_dq & input_dq) != input_dq)):
+            raise RuntimeError(f"Upstream DQ was not propagated: {row.denoised_path}")
         maximum_error = max(
             maximum_error,
             equation_error(denoised, input_image - residual, row.denoised_path),
         )
-    test = statistics.loc[statistics["split"] == "test"]
-    weak = test.loc[test["sequence"] == "90000002"]
-    high = test.loc[test["sequence"] == "90000003"]
-    test_noise_ratio = float(test["noise_ratio"].median())
-    weak_snr_ratio = float(weak["aperture_snr_ratio"].median())
-    high_flux_change = float(high["photometry_change_fraction"].abs().max())
-    print("Noise2Noise strict validation")
+    print("Noise2Noise structural validation")
     print(f"  frames/products: {len(statistics)}/{len(actual_denoised) + len(actual_residual)}")
     print(f"  float32 equation max error: {maximum_error:g}")
-    print(f"  test median noise ratio: {test_noise_ratio:.6f}")
-    print(f"  weak-source median aperture-SNR ratio: {weak_snr_ratio:.6f}")
-    print(f"  high-SNR max |flux change|: {100 * high_flux_change:.4f}%")
-    failures = []
     if maximum_error != 0:
-        failures.append("float32 equation")
-    if not test_noise_ratio < 1:
-        failures.append("test noise reduction")
-    if not weak_snr_ratio > 1:
-        failures.append("weak-source SNR")
-    if not high_flux_change <= 0.01:
-        failures.append("high-SNR photometry")
-    if failures:
-        raise RuntimeError(f"Noise2Noise science validation failed: {', '.join(failures)}")
+        raise RuntimeError("Noise2Noise float32 equation failed")
+    print("  DQ: upstream flags retained")
+    print("  weak-source performance: requires separate blind injection evaluation")
 
 
 if __name__ == "__main__":

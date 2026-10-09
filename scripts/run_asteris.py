@@ -28,7 +28,7 @@ PROFILES = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=tuple(PROFILES), required=True)
-    parser.add_argument("--stage", choices=("prepare", "train", "infer", "all"), default="all")
+    parser.add_argument("--stage", choices=("prepare", "train", "infer", "all"), required=True)
     parser.add_argument(
         "--input-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "background"
     )

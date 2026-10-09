@@ -124,3 +124,51 @@ def test_sequence_discovery_is_data_driven(tmp_path: Path):
         (root / "background_subtracted_example.fits").touch()
     (tmp_path / "empty_directory").mkdir()
     assert discover_sequences(tmp_path) == ("90000005", "90000007")
+
+
+def test_inference_uses_frozen_manifest_and_preserves_upstream_dq(tmp_path: Path, monkeypatch):
+    import hashlib
+    import json
+    from astropy.io import fits
+    from PIL import Image
+    from astr_ir.dq import DQ_DO_NOT_USE, DQ_NO_COVERAGE, read_dq, write_fits_with_dq
+    from astr_ir.noise2noise.processor import run_inference
+
+    input_root = tmp_path / "input"
+    frame_root = input_root / "s"
+    frame_root.mkdir(parents=True)
+    dataset_root = tmp_path / "raw"
+    blind_root = dataset_root / "盲点表"
+    blind_root.mkdir(parents=True)
+    shape = (96, 96)
+    for name in ("DeadBlindMap.tiff", "NoiseBlindMap.tiff"):
+        Image.fromarray(np.zeros(shape, np.uint8)).save(blind_root / name)
+    image = np.random.default_rng(4).normal(size=shape).astype(np.float32)
+    upstream_dq = np.zeros(shape, np.uint16)
+    upstream_dq[48, 48] = DQ_DO_NOT_USE | DQ_NO_COVERAGE
+    write_fits_with_dq(frame_root / "background_subtracted_sample.fits", image, fits.Header(), upstream_dq)
+
+    output_root = tmp_path / "output"
+    manifest_root = output_root / "manifests"
+    manifest_root.mkdir(parents=True)
+    split_path = manifest_root / "split_manifest.csv"
+    pd.DataFrame([dict(frame_id="s:000", sequence="s", frame_index=0, split="test",
+                       product_path="s/background_subtracted_sample.fits", filename="sample.fits",
+                       upstream_applied=True)]).to_csv(split_path, index=False)
+    pd.DataFrame([dict(pair_id="unused")]).to_csv(manifest_root / "pair_manifest.csv", index=False)
+    (manifest_root / "normalization.json").write_text(json.dumps({"s": 1.0}))
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"synthetic checkpoint")
+    manifest_hash = hashlib.sha256(split_path.read_bytes()).hexdigest()
+    monkeypatch.setattr("astr_ir.noise2noise.processor.load_model",
+                        lambda *a, **k: (None, {"split_manifest_sha256": "wrong"}))
+    with pytest.raises(ValueError, match="Checkpoint and split manifest differ"):
+        run_inference(input_root, dataset_root, output_root, checkpoint_path)
+    monkeypatch.setattr("astr_ir.noise2noise.processor.load_model",
+                        lambda *a, **k: (None, {"split_manifest_sha256": manifest_hash}))
+    monkeypatch.setattr("astr_ir.noise2noise.processor.denoise_array",
+                        lambda image, valid, *a, **k: (image.copy(), None))
+    result = run_inference(input_root, dataset_root, output_root, checkpoint_path)
+    product_dq = read_dq(output_root / result.iloc[0].denoised_path, shape)
+    assert product_dq[48, 48] == upstream_dq[48, 48]
+    assert result.iloc[0].denoise_strength == 1.0

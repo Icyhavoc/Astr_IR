@@ -110,7 +110,7 @@ nb["cells"] = [
                 root = PROJECT_ROOT / "data" / "processed" / f"asteris_paper_{profile}"
                 run_paper_inference(
                     INPUT_ROOT, DATASET_ROOT, root, root / "checkpoints" / "best_checkpoint.pt",
-                    evaluation_sequences=("90000002", "90000003"), device=DEVICE, overwrite=True,
+                    evaluation_sequences=("90000002", "90000003"), device=DEVICE, overwrite=False,
                 )
         """
     ),

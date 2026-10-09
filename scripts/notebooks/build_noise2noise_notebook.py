@@ -25,11 +25,12 @@ cells = [
         """
         # 背景扣除后 FITS 的 Noise2Noise 自监督去噪
 
-        本 Notebook 展示固定帧级切分、lag=2–5 时间配对、残差 DnCNN 训练记录、验证集去噪强度标定、
-        测试集科学指标。独立伪源盲检评估位于 `notebooks/evaluation/`。
-        测试集不参与 checkpoint 或 α 选择。
+        本 Notebook 展示固定帧级切分、lag=2–5 时间配对、残差 DnCNN 训练记录、
+        固定去噪强度和测试产品检查。独立全盲注入评估位于 `notebooks/evaluation/`。
+        测试集不参与 checkpoint 或去噪强度选择；旧执行输出仅供历史追溯。
 
-        完整重训命令：`python scripts/run_noise2noise.py --stage all --overwrite`。
+        重跑须使用新的输出目录：`python scripts/run_noise2noise.py --stage prepare --output-root data/processed/noise2noise_YYYYMMDD`。
+        训练、推理另行显式执行，不要将准备阶段当作训练授权。
         """
     ),
     code(
@@ -110,26 +111,7 @@ cells = [
         plt.show()
         """
     ),
-    md("## 3. 仅使用高 SNR 验证集标定去噪强度"),
-    code(
-        """
-        calibration = pd.read_csv(
-            OUTPUT_ROOT / "manifests" / "strength_calibration.csv",
-            encoding="utf-8-sig",
-        )
-        selected = calibration.loc[calibration["passes_photometry_gate"]].sort_values("strength").iloc[-1]
-        display(selected.to_frame("selected"))
-        fig, ax = plt.subplots(figsize=(7, 4), constrained_layout=True)
-        ax.plot(calibration["strength"], 100 * calibration["validation_max_abs_photometry_change"])
-        ax.axhline(1.0, color="tab:red", ls="--", label="1% photometry gate")
-        ax.axvline(selected["strength"], color="tab:green", ls=":", label="selected alpha")
-        ax.set(xlabel="Residual subtraction strength alpha", ylabel="Max |flux change| [%]")
-        ax.legend()
-        save_figure(fig, FIGURE_ROOT / "02_strength_calibration.png")
-        plt.show()
-        """
-    ),
-    md("## 4. 弱源测试帧的输入、去噪图和预测残差"),
+    md("## 3. 固定去噪强度与产品统计"),
     code(
         """
         statistics = pd.read_csv(
@@ -137,6 +119,15 @@ cells = [
             encoding="utf-8-sig",
             dtype={"sequence": str},
         )
+        strengths = statistics["denoise_strength"].dropna().unique()
+        assert len(strengths) == 1
+        display(pd.Series({"fixed strength": strengths[0], "frames": len(statistics)}).to_frame("value"))
+        print("去噪强度未经当前输入的注入/通量实验验证，不能仅凭此表宣称弱源性能提升。")
+        """
+    ),
+    md("## 4. 弱源测试帧的输入、去噪图和预测残差"),
+    code(
+        """
         sample = statistics.loc[
             (statistics["split"] == "test") & (statistics["sequence"] == "90000002")
         ].iloc[0]
@@ -150,25 +141,19 @@ cells = [
         plt.show()
         """
     ),
-    md("## 5. 冻结测试集科学指标"),
+    md("## 5. 冻结测试集产品指标"),
     code(
         """
         test = statistics.loc[statistics["split"] == "test"]
-        weak = test.loc[test["sequence"] == "90000002"]
-        high = test.loc[test["sequence"] == "90000003"]
         metrics = pd.Series({
             "test frames": len(test),
             "median noise ratio": test["noise_ratio"].median(),
-            "weak-source median SNR before": weak["aperture_snr_before"].median(),
-            "weak-source median SNR after": weak["aperture_snr_after"].median(),
-            "weak-source median SNR ratio": weak["aperture_snr_ratio"].median(),
-            "high-SNR max |flux change| [%]": 100 * high["photometry_change_fraction"].abs().max(),
             "max float32 equation error": statistics["equation_max_abs_error_float32"].max(),
         })
         display(metrics.to_frame("value"))
         """
     ),
-    md("## 6. 严格产品与科学门验收"),
+    md("## 6. 产品、切分和 DQ 验收"),
     code(
         """
         completed = subprocess.run(
@@ -182,7 +167,7 @@ cells = [
         if completed.stderr.strip():
             print(completed.stderr)
         if completed.returncode != 0:
-            raise RuntimeError("Noise2Noise strict validation failed")
+            raise RuntimeError("Noise2Noise structural validation failed")
         """
     ),
     md("## 7. 全项目自动测试"),
@@ -206,9 +191,9 @@ cells = [
         """
         ## 结论
 
-        该基线在冻结测试集上降低约 21.8% 相邻像元噪声，弱源孔径 SNR 中位数提高约 25.8%，
-        同时把高 SNR 最大流量变化控制在 1% 内。通用伪源完备度、纯度和假阳性结果在独立
-        evaluation Notebook 中展示，避免模型训练模块与科学评估逻辑耦合。
+        当前工作目录的旧结果已归档。重新生成产品后，本 Notebook 只检查切分、产品公式、
+        DQ 和描述性噪声指标。弱源通量传递、完整率和误检率必须在参数冻结后通过独立全盲
+        注入评估；旧 Notebook 执行输出不能代表当前预处理版本。
         """
     ),
 ]

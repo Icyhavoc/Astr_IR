@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from astropy.io import fits
 from scipy.ndimage import gaussian_filter
 
 from astr_ir.dq import read_dq, DQ_DO_NOT_USE
@@ -14,6 +15,23 @@ def science_valid(path, image, detector_mask):
     if dq is not None:
         valid &= (dq & DQ_DO_NOT_USE) == 0
     return valid
+
+
+def load_science(path, detector_mask):
+    """Read science, header and DQ once; return the mask used for computation."""
+    with fits.open(path, memmap=False) as hdul:
+        hdul.verify("silentfix")
+        image = np.asarray(hdul[0].data, dtype=np.float32)
+        header = hdul[0].header.copy()
+        dq = np.asarray(hdul["DQ"].data, dtype=np.uint16).copy() if "DQ" in hdul else None
+    if image.ndim != 2 or image.shape != np.shape(detector_mask):
+        raise ValueError(f"Science/detector shape mismatch: {path}")
+    if dq is not None and dq.shape != image.shape:
+        raise ValueError(f"DQ shape mismatch: {path}")
+    valid = np.isfinite(image) & ~np.asarray(detector_mask, bool)
+    if dq is not None:
+        valid &= (dq & DQ_DO_NOT_USE) == 0
+    return image, header, valid, dq
 
 
 def masked_gaussian(image, valid, sigma):

@@ -13,7 +13,7 @@ run_flicker.py → run_background.py → run_noise2noise.py
 
 原论文版 `run_asteris_paper.py` 已统一命名为 `run_asteris.py`；必须指定 `--profile 160` 或 `400`。
 旧 CLI 的 `--model asteris4`、`--stage calibrate/evaluate` 不再适用。
-阶段产品和模型目录没有因此改名，旧结果仍可追溯。
+主 CLI 都要求显式 `--stage`；旧结果在 `../_cleanup_backup/interface_optimization_20261009/` 追溯。
 
 ## 可选工具
 
@@ -78,7 +78,7 @@ python scripts/validation/validate_source_evaluation.py
 
 在第一轮之后，用户进一步要求清理 data/figures/docs；旧实验和过时材料已移出 code。
 第一轮“数据不动”的验收描述仅对应第一轮，当前保留项、移出项与恢复位置见 [数据清理记录](../data/README.md)。
-当前图像版本见 [figures/README.md](../figures/README.md)。辅助脚本不读取已归档的旧图或早期 N2N 评估表。
+当前图像状态见 [figures/README.md](../figures/README.md)。辅助脚本若使用默认旧结果路径，需要先指定新的有效实验目录。
 若追溯旧 ASTERIS4 的通用评估，必须显式提供归档的 `--model-output-root` 及单独 `--evaluation-root`；
 不能使用当前 background 冒充其旧输入。论文版评估继续使用 `evaluation/run_asteris_paper_evaluation.py`。
 

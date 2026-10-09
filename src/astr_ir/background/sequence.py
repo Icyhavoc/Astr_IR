@@ -15,7 +15,7 @@ from scipy.ndimage import binary_dilation, label, shift
 
 from .processor import BackgroundConfig, subtract_background, write_fits_products, neighbor_difference_noise, raw_filename_from_corrected
 from astr_ir.flicker.processor import load_fits, load_detector_mask, robust_std
-from astr_ir.registration import masked_gaussian, masked_shift, science_valid
+from astr_ir.registration import load_science, masked_gaussian, masked_shift, science_valid
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,7 @@ class _FitsFrames:
 def run_two_pass_batch(input_root,dataset_root,output_root,*,sequences=None,background_config=None,
                        config=None,limit_per_sequence=None,split_manifest=None):
     """Write a NEW experiment only. Existing output directories are refused."""
-    from astr_ir.evaluation.blind_joint import inspect_frame, register_features
+    from astr_ir.blind_registration import inspect_frame, register_features
     input_root,dataset_root,output_root=map(lambda p:Path(p).resolve(),(input_root,dataset_root,output_root))
     if output_root.exists(): raise FileExistsError(f'Use a fresh two-pass output directory: {output_root}')
     if output_root.is_relative_to(input_root) or input_root.is_relative_to(output_root) or output_root.is_relative_to(dataset_root):
@@ -145,7 +145,7 @@ def run_two_pass_batch(input_root,dataset_root,output_root,*,sequences=None,back
             split_isolated=frozen is not None,split_manifest=str(split_manifest) if split_manifest else None)
         destination=output_root/sequence; destination.mkdir(parents=True)
         for index,(path,offset) in enumerate(zip(files,offsets)):
-            image,header=load_fits(path); valid=science_valid(path,image,detector)
+            image,header,valid,_=load_science(path,detector)
             result=subtract_background(image,detector_mask=~valid,config=background_config,
                 image_source_mask=native_source_mask(source_masks[labels[index]],offset))
             header['HIERARCH BKG PASSES']=2; header['CATUSED']=False

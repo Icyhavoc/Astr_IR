@@ -19,7 +19,7 @@ from astr_ir.evaluation.mock_sources import (
     sample_injection_positions,
 )
 from astr_ir.evaluation.pipeline import _summarize_test, _training_psf
-from astr_ir.noise2noise.dataset import load_detector_mask
+from astr_ir.dq import load_detector_mask
 
 from .paper_pipeline import (
     _load_registered_stack,

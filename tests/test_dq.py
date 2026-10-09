@@ -12,6 +12,7 @@ from astr_ir.dq import (
     read_dq,
     write_fits_with_dq,
 )
+from astr_ir.registration import load_science
 
 
 def test_dq_distinguishes_detector_bad_missing_and_partial_coverage(tmp_path: Path):
@@ -40,3 +41,22 @@ def test_dq_distinguishes_detector_bad_missing_and_partial_coverage(tmp_path: Pa
     with fits.open(path) as hdul:
         assert hdul["DQ"].header["DQBIT0"] == "DO_NOT_USE"
         assert hdul["DQ"].header["DQBIT3"] == "PARTIAL"
+
+
+def test_load_science_excludes_upstream_dq_without_changing_pixels(tmp_path: Path):
+    science = np.arange(20, dtype=np.float32).reshape(4, 5)
+    dq = np.zeros_like(science, dtype=np.uint16)
+    dq[1, 1] = DQ_DO_NOT_USE | DQ_NO_COVERAGE
+    dq[2, 2] = DQ_PARTIAL_COVERAGE
+    detector = np.zeros_like(science, dtype=bool)
+    detector[3, 3] = True
+    path = tmp_path / "input.fits"
+    write_fits_with_dq(path, science, fits.Header(), dq)
+
+    loaded, _, valid, loaded_dq = load_science(path, detector)
+
+    assert np.array_equal(loaded, science)
+    assert np.array_equal(loaded_dq, dq)
+    assert not valid[1, 1]
+    assert not valid[3, 3]
+    assert valid[2, 2]

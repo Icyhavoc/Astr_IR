@@ -18,6 +18,8 @@ from scipy.ndimage import gaussian_filter
 from torch.utils.data import DataLoader
 
 from astr_ir.dq import build_dq, write_fits_with_dq
+from astr_ir.background.processor import neighbor_difference_noise
+from astr_ir.registration import load_science
 
 from .dataset import (
     PairedPatchDataset,
@@ -34,7 +36,6 @@ class Noise2NoiseConfig:
     seed: int = 20260820
     lags: tuple[int, ...] = (2, 3, 4, 5)
     patch_size: int = 128
-    source_patch_fraction: float = 0.5
     train_samples_per_epoch: int = 512
     validation_samples: int = 192
     batch_size: int = 8
@@ -55,8 +56,6 @@ class Noise2NoiseConfig:
             raise ValueError("Noise2Noise temporal lags must be >= 2")
         if self.patch_size < 32 or self.patch_size % 8 != 0:
             raise ValueError("patch_size must be >= 32 and divisible by 8")
-        if not 0 <= self.source_patch_fraction <= 1:
-            raise ValueError("source_patch_fraction must be in [0, 1]")
         if min(self.train_samples_per_epoch, self.validation_samples, self.batch_size) < 1:
             raise ValueError("sample and batch counts must be positive")
         if self.epochs < 1 or self.early_stopping_patience < 1:
@@ -93,6 +92,8 @@ def prepare_manifests(
     config = config or Noise2NoiseConfig()
     config.validate()
     output_root = Path(output_root)
+    if output_root.exists() and any(output_root.iterdir()):
+        raise FileExistsError(f"Prepare requires a fresh output root: {output_root}")
     manifest_root = output_root / "manifests"
     split = build_split_manifest(
         input_root,
@@ -175,6 +176,9 @@ def train_model(
 ) -> tuple[Path, pd.DataFrame]:
     config = config or Noise2NoiseConfig()
     config.validate()
+    checkpoint_root = Path(output_root) / "checkpoints"
+    if checkpoint_root.exists() and any(checkpoint_root.iterdir()):
+        raise FileExistsError(f"Training requires fresh checkpoints: {checkpoint_root}")
     set_reproducible_seed(config.seed)
     split, pairs, scales = load_manifests(output_root)
     detector_mask = load_detector_mask(dataset_root)
@@ -187,7 +191,6 @@ def train_model(
         split="train",
         patch_size=config.patch_size,
         samples_per_epoch=config.train_samples_per_epoch,
-        source_fraction=config.source_patch_fraction,
         augment=True,
         seed=config.seed,
     )
@@ -200,7 +203,6 @@ def train_model(
         split="validation",
         patch_size=config.patch_size,
         samples_per_epoch=config.validation_samples,
-        source_fraction=config.source_patch_fraction,
         augment=False,
         seed=config.seed + 97,
         cache_size=32,
@@ -278,6 +280,7 @@ def train_model(
             "epoch": epoch + 1,
             "config": asdict(config),
             "sequence_scales": scales,
+            "split_manifest_sha256": _checkpoint_hash(Path(output_root) / "manifests" / "split_manifest.csv"),
             "validation_loss": validation_loss,
         }
         torch.save(payload, last_path)
@@ -392,18 +395,6 @@ def robust_std(values: np.ndarray) -> float:
         return float("nan")
     center = np.median(values)
     return float(1.4826 * np.median(np.abs(values - center)))
-
-
-def neighbor_difference_noise(image: np.ndarray, mask: np.ndarray) -> float:
-    valid_h = ~mask[:, 1:] & ~mask[:, :-1]
-    valid_v = ~mask[1:, :] & ~mask[:-1, :]
-    differences = np.concatenate(
-        [
-            (image[:, 1:] - image[:, :-1])[valid_h],
-            (image[1:, :] - image[:-1, :])[valid_v],
-        ]
-    )
-    return robust_std(differences) / np.sqrt(2.0)
 
 
 def aperture_flux_snr(image: np.ndarray, target: Mapping) -> tuple[float, float]:
@@ -570,26 +561,27 @@ def run_inference(
     config: Noise2NoiseConfig | None = None,
     device: str | None = None,
     overwrite: bool = False,
-    strength: float | None = None,
+    strength: float = 1.0,
 ) -> pd.DataFrame:
     config = config or Noise2NoiseConfig()
     config.validate()
     input_root, output_root, checkpoint_path = Path(input_root), Path(output_root), Path(checkpoint_path)
     split, _, scales = load_manifests(output_root)
     detector_mask = load_detector_mask(dataset_root)
-    model, _ = load_model(checkpoint_path, device=device)
+    if (output_root / "noise2noise_statistics.csv").exists() and not overwrite:
+        raise FileExistsError(output_root / "noise2noise_statistics.csv")
+    model, checkpoint = load_model(checkpoint_path, device=device)
+    manifest_hash = _checkpoint_hash(output_root / "manifests" / "split_manifest.csv")
+    if checkpoint.get("split_manifest_sha256") != manifest_hash:
+        raise ValueError("Checkpoint and split manifest differ; use the original frozen run")
     checkpoint_hash = _checkpoint_hash(checkpoint_path)
-    strength = load_calibrated_strength(output_root) if strength is None else float(strength)
+    strength = float(strength)
+    if not 0 <= strength <= 1:
+        raise ValueError("denoise strength must be in [0, 1]")
     rows: list[dict] = []
     for frame in split.sort_values(["sequence", "frame_index"]).itertuples(index=False):
         input_path = input_root / frame.product_path
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with fits.open(input_path, memmap=False) as hdul:
-                hdul.verify("silentfix")
-                image = np.asarray(hdul[0].data, dtype=np.float32)
-                header = hdul[0].header.copy()
-        valid = ~detector_mask & np.isfinite(image)
+        image, header, valid, upstream_dq = load_science(input_path, detector_mask)
         scale = scales[str(frame.sequence)]
         denoised, _ = denoise_array(
             image,
@@ -614,6 +606,8 @@ def run_inference(
             detector_bad=detector_mask,
             no_coverage=~np.isfinite(original32),
         )
+        if upstream_dq is not None:
+            dq |= upstream_dq
         write_fits_with_dq(
             denoised_path,
             denoised32,
@@ -634,13 +628,7 @@ def run_inference(
             overwrite=overwrite,
             output_verify="silentfix",
         )
-        target = {
-            key: getattr(frame, key)
-            for key in ("xc", "yc", "r_ap", "r_in", "r_out")
-        }
-        flux_before, snr_before = aperture_flux_snr(original32, target)
-        flux_after, snr_after = aperture_flux_snr(denoised32, target)
-        metric_mask = detector_mask | ~np.isfinite(original32)
+        metric_mask = ~valid
         metric_mask[: config.edge_width] = True
         metric_mask[-config.edge_width :] = True
         metric_mask[:, : config.edge_width] = True
@@ -666,26 +654,11 @@ def run_inference(
                 "split": frame.split,
                 "filename": frame.filename,
                 "upstream_applied": bool(frame.upstream_applied),
-                "input_snr": frame.input_snr,
                 "normalization_scale": scale,
                 "denoise_strength": strength,
                 "noise_before": noise_before,
                 "noise_after": noise_after,
                 "noise_ratio": noise_after / max(noise_before, np.finfo(float).eps),
-                "photometry_before": flux_before,
-                "photometry_after": flux_after,
-                "photometry_change_fraction": (
-                    (flux_after - flux_before) / flux_before
-                    if np.isfinite(flux_before) and flux_before != 0 and np.isfinite(flux_after)
-                    else np.nan
-                ),
-                "aperture_snr_before": snr_before,
-                "aperture_snr_after": snr_after,
-                "aperture_snr_ratio": (
-                    snr_after / snr_before
-                    if np.isfinite(snr_before) and snr_before != 0 and np.isfinite(snr_after)
-                    else np.nan
-                ),
                 "equation_max_abs_error_float32": equation_error,
                 "denoised_path": denoised_path.relative_to(output_root).as_posix(),
                 "residual_path": residual_path.relative_to(output_root).as_posix(),

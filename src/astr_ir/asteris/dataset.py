@@ -10,10 +10,10 @@ import numpy as np
 import pandas as pd
 import torch
 from astropy.io import fits
-from astr_ir.registration import masked_shift, science_valid
+from astr_ir.registration import load_science, masked_shift
 from torch.utils.data import Dataset
 
-from astr_ir.noise2noise.dataset import load_detector_mask
+from astr_ir.dq import load_detector_mask
 
 from .preprocessing import (
     circular_source_mask,
@@ -148,8 +148,7 @@ def load_registered_stack(
     input_root = Path(input_root)
     images, validity = [], []
     for row in rows.itertuples(index=False):
-        image = np.asarray(fits.getdata(input_root / row.product_path), dtype=np.float32)
-        valid = science_valid(input_root / row.product_path, image, detector_mask)
+        image, _, valid, _ = load_science(input_root / row.product_path, detector_mask)
         dy, dx = float(row.alignment_dy), float(row.alignment_dx)
         aligned, aligned_valid, _, _ = masked_shift(image, valid, (dy, dx))
         images.append(aligned)

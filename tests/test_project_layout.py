@@ -5,13 +5,20 @@ import ast
 import json
 from pathlib import Path
 import re
+import subprocess
 
 import nbformat
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = sorted((ROOT / "scripts").rglob("*.py"))
+SCRIPTS = sorted(
+    ROOT / relative
+    for relative in subprocess.check_output(
+        ["git", "ls-files", "--", "scripts"], cwd=ROOT, text=True
+    ).splitlines()
+    if relative.endswith(".py")
+)
 NOTEBOOKS = sorted((ROOT / "notebooks").rglob("*.ipynb"))
 
 

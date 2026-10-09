@@ -318,3 +318,39 @@ def test_paper_loss_uses_released_stack_weight():
     assert torch.isclose(stack_l1, torch.tensor(500_000.0))
     assert torch.isclose(mean_l2, torch.tensor(1_000_000.0))
     assert torch.isclose(total, torch.tensor(1_062_500.0))
+
+
+def test_paper_prepare_keeps_test_split_without_materializing_test_stack(tmp_path: Path, monkeypatch):
+    import astr_ir.asteris.paper_pipeline as pipeline
+
+    input_root = tmp_path / "input"
+    sequence_root = input_root / "s"
+    sequence_root.mkdir(parents=True)
+    rows = []
+    for index, split in enumerate(("train", "validation", "test")):
+        path = sequence_root / f"{split}.fits"
+        path.touch()
+        rows.append(dict(frame_id=f"s:{index}", sequence="s", frame_index=index,
+                         split=split, product_path=f"s/{split}.fits", filename=path.name,
+                         alignment_dx=0.0, alignment_dy=0.0))
+    frozen = pd.DataFrame(rows)
+    monkeypatch.setattr(pipeline, "load_detector_mask", lambda _: np.zeros((32, 32), bool))
+    monkeypatch.setattr(pipeline, "_load_registered_stack",
+                        lambda group, *a: (np.ones((len(group), 32, 32), np.float32),
+                                           np.ones((len(group), 32, 32), bool)))
+    monkeypatch.setattr(pipeline, "paper_sigma_clip",
+                        lambda stack, valid, **k: (stack, np.zeros_like(stack), valid, {}))
+    monkeypatch.setattr(pipeline, "_mse_order", lambda stack, valid: np.arange(len(stack)))
+    monkeypatch.setattr(pipeline, "_normalize_stack", lambda stack, valid, scale: (stack, 0.0, 1.0))
+
+    output_root = tmp_path / "output"
+    split, stacks = pipeline.prepare_paper_dataset(
+        input_root, tmp_path / "raw", output_root, sequences=("s",), frozen_manifest=frozen
+    )
+    assert set(split.split) == {"train", "validation", "test"}
+    assert set(stacks.split) == {"train", "validation"}
+    assert not list((output_root / "paper_stacks").glob("*test*"))
+    with pytest.raises(FileExistsError, match="fresh output root"):
+        pipeline.prepare_paper_dataset(
+            input_root, tmp_path / "raw", output_root, sequences=("s",), frozen_manifest=frozen
+        )

@@ -6,12 +6,23 @@ from pathlib import Path
 
 from astropy.io import fits
 import numpy as np
+from PIL import Image
 
 
 DQ_DO_NOT_USE = np.uint16(1 << 0)
 DQ_DETECTOR_BAD = np.uint16(1 << 1)
 DQ_NO_COVERAGE = np.uint16(1 << 2)
 DQ_PARTIAL_COVERAGE = np.uint16(1 << 3)
+
+
+def load_detector_mask(dataset_root: str | Path) -> np.ndarray:
+    """Read the original detector blind maps as one science exclusion mask."""
+    blind_map_dir = Path(dataset_root) / "盲点表"
+    dead = np.asarray(Image.open(blind_map_dir / "DeadBlindMap.tiff")) != 0
+    noise = np.asarray(Image.open(blind_map_dir / "NoiseBlindMap.tiff")) != 0
+    if dead.shape != noise.shape:
+        raise ValueError("DeadBlindMap and NoiseBlindMap have different shapes")
+    return dead | noise
 
 
 def build_dq(
@@ -84,4 +95,3 @@ def read_dq(path: str | Path, shape: tuple[int, int]) -> np.ndarray | None:
     if dq.shape != shape:
         raise ValueError(f"DQ shape {dq.shape} does not match science data {shape}")
     return dq
-

@@ -82,7 +82,7 @@ def test_frozen_splits_generate_disjoint_source_masks(tmp_path,monkeypatch):
         fits.writeto(incoming/f'flicker_corrected_{index:03d}.fits',image.astype(np.float32))
         rows.append(dict(sequence='s',filename=f'{index:03d}.fits',split='train' if index<2 else 'test'))
     manifest=tmp_path/'split.csv'; pd.DataFrame(rows).to_csv(manifest,index=False)
-    import astr_ir.evaluation.blind_joint as joint
+    import astr_ir.blind_registration as joint
     monkeypatch.setattr(joint,'inspect_frame',lambda p,d:(fits.getdata(p),np.ones(shape,bool),fits.Header(),None,np.empty((0,4)),2.))
     monkeypatch.setattr(joint,'register_features',lambda *a:(np.zeros(2),1.,{}))
     memberships=[]
