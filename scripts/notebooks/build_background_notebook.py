@@ -6,6 +6,7 @@ from pathlib import Path
 from textwrap import dedent
 
 import nbformat as nbf
+from starmap_cells import build_cells
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -246,6 +247,11 @@ cells = [
     ),
 ]
 
+cells.extend(build_cells(
+    "background",
+    "background/90000003/background_subtracted_IR01_RKZ50_SCIE_20260315132820958.fits",
+    "示例与 flicker 阶段是同一张 90000003 原始曝光的连续预处理版本。",
+))
 notebook = nbf.v4.new_notebook(
     cells=cells,
     metadata={

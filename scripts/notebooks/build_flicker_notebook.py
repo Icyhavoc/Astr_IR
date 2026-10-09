@@ -4,6 +4,7 @@ from pathlib import Path
 import textwrap
 
 import nbformat as nbf
+from starmap_cells import build_cells
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -325,6 +326,11 @@ code(
     """
 )
 
+cells.extend(build_cells(
+    "flicker",
+    "flicker/90000003/flicker_corrected_IR01_RKZ50_SCIE_20260315132820958.fits",
+    "示例与背景阶段是同一张 90000003 原始曝光的连续预处理版本。",
+))
 nb["cells"] = cells
 nb["metadata"] = {
     "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},

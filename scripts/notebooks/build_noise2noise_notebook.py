@@ -6,6 +6,7 @@ from pathlib import Path
 import textwrap
 
 import nbformat as nbf
+from starmap_cells import build_cells
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -198,6 +199,11 @@ cells = [
     ),
 ]
 
+cells.extend(build_cells(
+    "noise2noise",
+    "noise2noise/denoised/90000003/noise2noise_denoised_IR01_RKZ50_SCIE_20260315132820958.fits",
+    "这是旧版 N2N 权重与旧版预处理的归档输出；不能把它与上方最新 flicker/background 图的像素差异归因于 N2N。",
+))
 notebook = nbf.v4.new_notebook(
     cells=cells,
     metadata={

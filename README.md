@@ -31,7 +31,7 @@ figures/      新实验图像位置；旧结果图已归档
 辅助命令和清理记录见 [scripts/README.md](scripts/README.md)；模块职责见 [架构说明](docs/architecture.md)。
 论文在项目上一级的 `../paper/`，不在 `code/` 内。
 
-真实弱源人工核验可在结果重建并冻结参数后运行 [全盲评估 Notebook](notebooks/evaluation/02_blind_pre_asteris_pipeline.ipynb) 第 5 节；星表不参与处理或训练。
+真实弱源人工核验可在结果重建并冻结参数后运行 [全盲评估 Notebook](notebooks/evaluation/02_blind_pre_asteris_pipeline.ipynb) 第 5 节；星表不参与处理或训练。四个主阶段 Notebook 各有一张 90000003 的 2MASS 位置叠加示例；序列间指向、旋转与旧结果版本限制见 [星表配准核验](docs/evaluation/starmap_registration.md)。
 
 弱源检出改进实验在同一 Notebook 第 6 节：逐阶段随机注入、两轮全盲背景、PSF 选择与残差再检测、局部噪声校准。
 全部运行开关默认关闭，不训练、不覆盖旧结果；使用方法及未验证边界见 [V3 说明](docs/evaluation/weak_source_v3.md)。

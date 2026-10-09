@@ -4,6 +4,7 @@ from pathlib import Path
 import textwrap
 
 import nbformat as nbf
+from starmap_cells import build_cells
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -143,6 +144,11 @@ nb["cells"] = [
     ),
 ]
 
+nb["cells"].extend(build_cells(
+    "asteris8_160_old",
+    "asteris_paper_160/coadds/90000003/asteris8_coadd_90000003.fits",
+    "这是旧版 160 帧实验的测试共加输出，不是单帧；其上游预处理与最新 flicker/background 示例不同，且不能与 N2N 单帧直接比较。",
+))
 NOTEBOOK.parent.mkdir(parents=True, exist_ok=True)
 nbf.write(nb, NOTEBOOK)
 print(NOTEBOOK)
