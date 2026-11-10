@@ -13,7 +13,7 @@
 | ASTERIS 分支 | [RKZ50 仪器专用实验](notebooks/asteris/01_rkz50_instrument_asteris.ipynb) | `scripts/run_asteris.py --stage prepare/train/select/infer` |
 
 两个模型分支都只读取 `background_subtracted_*.fits`，不相互串联；`flicker_model_*`、`background_model_*` 不作为后续科学输入。
-项目复用 ASTERIS 网络架构，但 RKZ50 地基数据的正式训练固定为随机初始化；发布的 JWST NIRCam 权重不作为默认或正式初始化。正式切分按四个独立天区进行，最低 validation MSE 仅作诊断；候选 checkpoint 必须按冻结误检预算下的盲注入完整率选择。
+项目复用 ASTERIS 网络架构，当前实验分支优先测试紧凑 ASTERIS4（Restormer/时空 Transformer 系列）并保留完整 ASTERIS8 容量对照；RKZ50 正式训练固定随机初始化，发布的 JWST NIRCam 权重不作为默认或正式初始化。正式切分按四个独立天区进行，最低 validation MSE 仅作诊断；候选 checkpoint 必须按冻结误检预算下的盲注入完整率选择。
 
 ## 目录
 

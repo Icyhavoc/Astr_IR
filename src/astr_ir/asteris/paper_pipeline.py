@@ -1,10 +1,10 @@
-"""Paper-faithful ASTERIS8 training and multi-exposure coadd inference.
+"""RKZ50 instrument-specific ASTERIS training and multi-exposure inference.
 
-This module follows the released ASTERIS architecture and workflow: sixteen independent
-exposures form interlaced eight-frame input/target volumes, temporal and global
+This experimental branch uses a compact released ASTERIS4 architecture: eight independent
+exposures form interlaced four-frame input/target volumes, temporal and global
 3-sigma clipping are applied before training, each half is median-centred, the
-official ASTERIS8 network is optimized with stack SmoothL1 plus temporal-mean
-MSE, and inference collapses the eight denoised slices into one science coadd.
+ASTERIS network is optimized with stack SmoothL1 plus temporal-mean
+MSE, and inference collapses the four denoised slices into one science coadd.
 """
 
 from __future__ import annotations
@@ -63,18 +63,20 @@ def _masked_mean(stack: np.ndarray, valid: np.ndarray, axis: int = 0) -> np.ndar
 
 @dataclass(frozen=True)
 class PaperAsterisConfig:
-    model: str = "asteris8"
-    patch_t: int = 8
-    patch_size: int = 128
-    f_maps: int = 24
-    num_refinement_blocks: int = 4
+    model: str = "asteris4"
+    patch_t: int = 4
+    patch_size: int = 64
+    f_maps: int = 8
+    num_blocks: tuple[int, ...] = (1, 1, 2)
+    num_refinement_blocks: int = 1
+    heads: tuple[int, ...] = (1, 2, 4)
     scale_factor: float = 4.0
     temporal_sigma: float = 3.0
     global_sigma: float = 3.0
     mse_select: bool = True
     epochs: int = 20
-    samples_per_sequence: int = 64
-    validation_samples_per_sequence: int = 16
+    samples_per_sequence: int = 256
+    validation_samples_per_sequence: int = 32
     batch_size: int = 1
     learning_rate: float = 1.5e-4
     weight_decay: float = 1e-4
@@ -85,7 +87,7 @@ class PaperAsterisConfig:
     selection_max_false_peaks_per_image: float = 0.5
     selection_flux_response_tolerance: float = 0.05
     seed: int = 20260825
-    inference_tile_size: int = 128
+    inference_tile_size: int = 64
     inference_overlap: int = 16
     amp: bool = True
     # RKZ50 ground-based data are a different instrument/noise domain from
@@ -96,12 +98,20 @@ class PaperAsterisConfig:
     official_checkpoint: str | None = None
 
     def validate(self) -> None:
-        if self.model.lower() != "asteris8" or self.patch_t != 8:
-            raise ValueError("Paper workflow requires the released eight-slice ASTERIS8 architecture")
-        if self.patch_size % 8 or self.inference_tile_size % 8:
-            raise ValueError("ASTERIS8 spatial sizes must be divisible by 8")
-        if self.patch_size < 32 or self.inference_tile_size < 32:
-            raise ValueError("ASTERIS8 spatial sizes must be at least 32 pixels")
+        model = self.model.lower()
+        expected_t = 4 if model == "asteris4" else 8 if model == "asteris8" else None
+        if expected_t is None or self.patch_t != expected_t:
+            raise ValueError("model and patch_t must be asteris4/4 or asteris8/8")
+        levels = 3 if model == "asteris4" else 4
+        divisor = 4 if model == "asteris4" else 8
+        if len(self.num_blocks) != levels or len(self.heads) != levels:
+            raise ValueError(f"{model} requires {levels} block/head levels")
+        if min(self.num_blocks) < 1 or min(self.heads) < 1 or self.f_maps < 4:
+            raise ValueError("Compact network widths, blocks, and heads must be positive")
+        if self.patch_size % divisor or self.inference_tile_size % divisor:
+            raise ValueError(f"{model} spatial sizes must be divisible by {divisor}")
+        if self.patch_size < 16 or self.inference_tile_size < 16:
+            raise ValueError("ASTERIS spatial sizes must be at least 16 pixels")
         if min(self.epochs, self.samples_per_sequence, self.batch_size) < 1:
             raise ValueError("Training sizes and epochs must be positive")
         if self.scale_factor <= 0:
@@ -312,7 +322,7 @@ def prepare_paper_dataset(
 
 
 class PaperAsterisDataset(Dataset):
-    """Random paper-style 16-exposure pairs sampled from prepared sequence stacks."""
+    """Random paired exposure volumes sampled from prepared sequence stacks."""
 
     def __init__(
         self,
@@ -321,16 +331,18 @@ class PaperAsterisDataset(Dataset):
         split: str,
         *,
         patch_size: int,
+        patch_t: int,
         samples_per_sequence: int,
         seed: int,
         augment: bool,
     ) -> None:
         self.rows = stack_manifest.loc[stack_manifest["split"].eq(split)].reset_index(drop=True)
-        if self.rows.empty or (self.rows["frames"] < 16).any():
-            raise ValueError(f"Every {split} stack must contain at least 16 frames")
+        if self.rows.empty or (self.rows["frames"] < 2 * patch_t).any():
+            raise ValueError(f"Every {split} stack must contain at least {2 * patch_t} frames")
         self.root = Path(output_root)
         self.split = split
         self.patch_size = int(patch_size)
+        self.patch_t = int(patch_t)
         self.samples_per_sequence = int(samples_per_sequence)
         self.seed = int(seed)
         self.augment = bool(augment)
@@ -359,10 +371,10 @@ class PaperAsterisDataset(Dataset):
         stack, valid = self._stack(row_index)
         count, height, width = stack.shape
         if self.split == "train":
-            selected = rng.choice(count, size=16, replace=False)
+            selected = rng.choice(count, size=2 * self.patch_t, replace=False)
         else:
-            start = (int(index) // len(self.rows)) % max(count - 15, 1)
-            selected = np.arange(start, start + 16) % count
+            start = (int(index) // len(self.rows)) % max(count - 2 * self.patch_t + 1, 1)
+            selected = np.arange(start, start + 2 * self.patch_t) % count
         size = self.patch_size
         best = None
         for _ in range(24):
@@ -440,8 +452,12 @@ def train_paper_model(
     if checkpoint_root.exists() and any(checkpoint_root.iterdir()):
         raise FileExistsError(f"Training requires fresh checkpoints: {checkpoint_root}")
     prepared = json.loads((output_root / "manifests" / "paper_config.json").read_text(encoding="utf-8"))
-    for key in ("scale_factor", "temporal_sigma", "global_sigma", "mse_select"):
+    for key in ("model", "patch_t", "patch_size", "f_maps", "num_refinement_blocks",
+                "scale_factor", "temporal_sigma", "global_sigma", "mse_select"):
         if prepared[key] != getattr(config, key):
+            raise ValueError(f"Prepared stack configuration differs from training: {key}")
+    for key in ("num_blocks", "heads"):
+        if tuple(prepared[key]) != tuple(getattr(config, key)):
             raise ValueError(f"Prepared stack configuration differs from training: {key}")
     stacks = pd.read_csv(
         output_root / "manifests" / "paper_stack_manifest.csv",
@@ -453,6 +469,7 @@ def train_paper_model(
         output_root,
         "train",
         patch_size=config.patch_size,
+        patch_t=config.patch_t,
         samples_per_sequence=config.samples_per_sequence,
         seed=config.seed,
         augment=True,
@@ -462,6 +479,7 @@ def train_paper_model(
         output_root,
         "validation",
         patch_size=config.patch_size,
+        patch_t=config.patch_t,
         samples_per_sequence=config.validation_samples_per_sequence,
         seed=config.seed + 17,
         augment=False,
@@ -469,8 +487,10 @@ def train_paper_model(
     _seed_everything(config.seed)
     device_obj = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model = build_asteris_model(
-        "asteris8", f_maps=config.f_maps, num_refinement_blocks=config.num_refinement_blocks
+        config.model, f_maps=config.f_maps, num_blocks=config.num_blocks,
+        num_refinement_blocks=config.num_refinement_blocks, heads=config.heads,
     ).to(device_obj)
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
@@ -565,11 +585,13 @@ def train_paper_model(
             "scheduler_state": scheduler.state_dict(),
             "config": asdict(config),
             "split_manifest_sha256": _checkpoint_hash(output_root / "manifests" / "split_manifest.csv"),
-            "upstream_source_sha256": upstream_source_sha256("asteris8"),
+            "upstream_source_sha256": upstream_source_sha256(config.model),
             "weight_initialization": "random",
             "initialization_checkpoint": None,
             "initialization_domain": "RKZ50 ground-based training only",
             "jwst_weights_used": False,
+            "parameter_count": parameter_count,
+            "network_preset": "rkz50_compact4" if config.model == "asteris4" else "asteris8_full",
             "lowest_validation_loss": min(lowest_validation_loss, float(validation_mean[0])),
             "formal_selection_status": "pending_blind_injection_detection_evaluation",
             "formal_selection_metric": "validation injection completeness at fixed false peaks per image",
@@ -694,7 +716,8 @@ def load_paper_model(
     checkpoint = torch.load(Path(checkpoint_path), map_location=device_obj, weights_only=False)
     config = PaperAsterisConfig(**checkpoint["config"])
     model = build_asteris_model(
-        "asteris8", f_maps=config.f_maps, num_refinement_blocks=config.num_refinement_blocks
+        config.model, f_maps=config.f_maps, num_blocks=config.num_blocks,
+        num_refinement_blocks=config.num_refinement_blocks, heads=config.heads,
     ).to(device_obj)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -702,7 +725,7 @@ def load_paper_model(
 
 
 def process_nmean(stack: np.ndarray, valid: np.ndarray, nmean: int = 8) -> tuple[np.ndarray, np.ndarray]:
-    """Collapse an arbitrary exposure stack into the released model's eight bins."""
+    """Collapse an arbitrary exposure stack into the configured temporal bins."""
 
     indices = np.array_split(np.arange(len(stack)), nmean)
     outputs, masks = [], []
@@ -735,7 +758,7 @@ def denoise_registered_exposures(
     *,
     device: str | torch.device,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float]]:
-    """Apply the released clipping, eight-bin inference and temporal collapse."""
+    """Apply clipping, configured-bin inference and temporal collapse."""
 
     clipped, clip_residual, clipped_valid, clip_metrics = paper_sigma_clip(
         physical,
@@ -744,7 +767,7 @@ def denoise_registered_exposures(
         global_sigma=config.global_sigma,
     )
     normalized, center, std = _normalize_stack(clipped, clipped_valid, config.scale_factor)
-    model_stack, model_valid = process_nmean(normalized, clipped_valid, nmean=8)
+    model_stack, model_valid = process_nmean(normalized, clipped_valid, nmean=config.patch_t)
     mean_image = _masked_mean(model_stack, model_valid)
     bias = float(np.nanmedian(mean_image))
     model_input = model_stack - bias
@@ -790,7 +813,7 @@ def run_paper_inference(
     overwrite: bool = False,
     require_detection_selection: bool = True,
 ) -> pd.DataFrame:
-    """Write one full-strength ASTERIS8 temporal coadd for each held-out sequence."""
+    """Write one selected ASTERIS temporal coadd for each held-out sequence."""
 
     input_root, dataset_root, output_root = Path(input_root), Path(dataset_root), Path(output_root)
     checkpoint_path = Path(checkpoint_path)
@@ -828,16 +851,16 @@ def run_paper_inference(
             partial_coverage=(coverage > 0) & (coverage < len(valid)),
         )
         header = fits.getheader(input_root / group.iloc[-1].product_path).copy()
-        header["HIERARCH AST MODEL"] = "ASTERIS8_PAPER"
+        header["HIERARCH AST MODEL"] = config.model.upper() + "_RKZ50"
         header["HIERARCH AST NEXP"] = len(group)
-        header["HIERARCH AST NBIN"] = 8
+        header["HIERARCH AST NBIN"] = config.patch_t
         header["HIERARCH AST CKPT"] = checkpoint_hash[:16]
         header["HIERARCH AST ALPHA"] = 1.0
         sequence_root = output_root / "coadds" / str(sequence)
         paths = {
             "input": sequence_root / f"input_coadd_{sequence}.fits",
-            "denoised": sequence_root / f"asteris8_coadd_{sequence}.fits",
-            "residual": sequence_root / f"asteris8_residual_{sequence}.fits",
+            "denoised": sequence_root / f"{config.model}_coadd_{sequence}.fits",
+            "residual": sequence_root / f"{config.model}_residual_{sequence}.fits",
         }
         sequence_root.mkdir(parents=True, exist_ok=True)
         for kind, path, data in (

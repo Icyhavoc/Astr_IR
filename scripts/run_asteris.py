@@ -27,6 +27,7 @@ SEQUENCES = tuple(RKZ50_FIELD_ASSIGNMENTS)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--network", choices=("compact4", "full8"), default="compact4")
     parser.add_argument("--stage", choices=("prepare", "train", "select", "infer"), required=True)
     parser.add_argument(
         "--input-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "background"
@@ -42,11 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flux-response-tolerance", type=float, default=0.05)
     parser.add_argument("--device")
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--patch-size", type=int, default=128)
-    parser.add_argument("--samples-per-sequence", type=int, default=64)
-    parser.add_argument("--validation-samples-per-sequence", type=int, default=16)
-    parser.add_argument("--inference-tile-size", type=int, default=128)
-    parser.add_argument("--inference-overlap", type=int, default=16)
+    parser.add_argument("--patch-size", type=int)
+    parser.add_argument("--samples-per-sequence", type=int)
+    parser.add_argument("--validation-samples-per-sequence", type=int)
+    parser.add_argument("--inference-tile-size", type=int)
+    parser.add_argument("--inference-overlap", type=int)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--evaluation-sequences",
@@ -62,14 +63,22 @@ def main() -> None:
     output_root = args.output_root or (
         PROJECT_ROOT / "data" / "processed" / "asteris_rkz50_field_split"
     )
+    base = PaperAsterisConfig()
+    if args.network == "full8":
+        base = replace(base, model="asteris8", patch_t=8, patch_size=128, f_maps=24,
+                       num_blocks=(4, 6, 6, 8), num_refinement_blocks=4,
+                       heads=(1, 2, 4, 8), samples_per_sequence=64,
+                       validation_samples_per_sequence=16, inference_tile_size=128)
     config = replace(
-        PaperAsterisConfig(),
+        base,
         epochs=args.epochs,
-        patch_size=args.patch_size,
-        samples_per_sequence=args.samples_per_sequence,
-        validation_samples_per_sequence=args.validation_samples_per_sequence,
-        inference_tile_size=args.inference_tile_size,
-        inference_overlap=args.inference_overlap,
+        patch_size=args.patch_size or base.patch_size,
+        samples_per_sequence=args.samples_per_sequence or base.samples_per_sequence,
+        validation_samples_per_sequence=(args.validation_samples_per_sequence
+                                         or base.validation_samples_per_sequence),
+        inference_tile_size=args.inference_tile_size or base.inference_tile_size,
+        inference_overlap=(args.inference_overlap if args.inference_overlap is not None
+                           else base.inference_overlap),
     )
     if args.stage == "prepare":
         split, stacks = prepare_paper_dataset(

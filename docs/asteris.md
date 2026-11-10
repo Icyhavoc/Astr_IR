@@ -14,14 +14,14 @@
 
 ## 模型与数据流
 
-使用原作者 ASTERIS8 **网络架构**，但针对 RKZ50 地基红外数据从随机权重开始训练；输入来自 background 科学图：
+当前实验分支默认使用原作者 Restormer/ASTERIS 系列中的紧凑 ASTERIS4：`f_maps=8`、blocks=`1/1/2`、refinement block=`1`。完整 ASTERIS8 仍可通过 `--network full8` 作为容量对照。两者都针对 RKZ50 地基红外数据从随机权重开始训练；输入来自 background 科学图：
 
 1. 按独立天区冻结切分，随后进行配准及 DQ 有效区处理。
-2. 16 张独立曝光随机抽样并交错为 8 帧 input / 8 帧 target。
+2. 紧凑版从 8 张独立曝光随机抽样并交错为 4 帧 input / 4 帧 target；完整 ASTERIS8 仍为 8/8。
 3. 时间轴及全 3D 的 3σ clipping、MSE 帧排序、全局 z-score、`/4 + 1`。
 4. 两半独立中值居中，官方旋转/翻转及 input-target 交换。
 5. `1e6 × (0.125 × SmoothL1(stack) + MSE(temporal mean))`，只在有效体素约简。
-6. 测试曝光合并成 8 个时间 bin，网络输出时间平均成为科学共加图，不做 α 混合。
+6. 测试曝光按模型深度合并成 4 或 8 个时间 bin，网络输出时间平均成为科学共加图，不做 α 混合。
 
 AdamW：学习率 `1.5e-4`、weight decay `1e-4`，余弦 `T_max=2,000,000`。
 8 GB GPU 使用 AMP；反向传播去掉公共损失尺度 `1e6`，日志保留官方尺度。
@@ -48,13 +48,16 @@ AdamW：学习率 `1.5e-4`、weight decay `1e-4`，余弦 `T_max=2,000,000`。
 
 ```powershell
 python scripts/run_asteris.py --stage prepare --output-root data/processed/asteris_rkz50_field_split_run1
-python scripts/run_asteris.py --stage train --output-root data/processed/asteris_rkz50_field_split_run1
+python scripts/run_asteris.py --network compact4 --stage train --output-root data/processed/asteris_rkz50_field_split_run1
 python scripts/run_asteris.py --stage select --output-root data/processed/asteris_rkz50_field_split_run1 `
   --selection-table data/processed/evaluation/run1/checkpoint_detection_metrics.csv
 python scripts/run_asteris.py --stage infer --output-root data/processed/asteris_rkz50_field_split_run1
 ```
 
 主 CLI 不提供 JWST 权重初始化开关，训练固定从随机权重开始。正式推理必须使用 `selected_checkpoint.json` 冻结的 checkpoint；直接把 last checkpoint 或最低 MSE checkpoint 用作正式结果会被拒绝。checkpoint 在推理时同时核对冻结 split manifest 与选择记录。当前背景参数仍需验证，本次未运行 prepare、正式训练或推理。
+
+紧凑版默认使用 64×64 裁块、每个训练序列每 epoch 256 个随机组合，validation 为 32 个固定组合。增加组合数只改善同一天区内的覆盖，不等价于增加独立天区；当前只有两个训练天区，因此不会把扩大 epoch/裁块数当作主要提升来源。
+紧凑版的参数量与 smoke-test 记录见 [实验说明](evaluation/rkz50_compact_asteris4.md)。
 辅助的多曝光伪源评估、160/400 汇总、星表标注都在 `scripts/evaluation/`。
 
 ## 已有历史结果（旧预处理）

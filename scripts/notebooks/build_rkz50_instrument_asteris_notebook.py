@@ -27,6 +27,8 @@ nb["cells"] = [
         # RKZ50 仪器专用 ASTERIS
 
         目标：在不复用 JWST 权重的前提下，比较仪器专用小网络与完整 ASTERIS8。
+        当前分支默认是紧凑 ASTERIS4：4 帧时间深度、`f_maps=8`、blocks=`1/1/2`、
+        一个 refinement block；它仍是 Restormer/时空 Transformer 系列，而不是卷积替代品。
         四个独立天区严格隔离；正式 checkpoint 按固定误检预算内的盲注入完整率选择，
         validation MSE 只作训练诊断。
 
@@ -57,7 +59,13 @@ nb["cells"] = [
         SELECTION_TABLE = PROJECT_ROOT / "data" / "processed" / "evaluation" / "run1" / "checkpoint_detection_metrics.csv"
         DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
         CONFIG = PaperAsterisConfig()
-        CONFIG
+        {
+            "model": CONFIG.model,
+            "patch_t": CONFIG.patch_t,
+            "f_maps": CONFIG.f_maps,
+            "num_blocks": CONFIG.num_blocks,
+            "samples_per_sequence": CONFIG.samples_per_sequence,
+        }
         """
     ),
     markdown("## 1. 冻结四天区切分"),

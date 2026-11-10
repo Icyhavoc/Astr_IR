@@ -59,6 +59,8 @@ def test_original_asteris_adapter_preserves_shape(name, depth, f_maps, blocks, h
 
 def test_paper_config_defaults_to_random_ground_initialization():
     config = PaperAsterisConfig()
+    assert (config.model, config.patch_t, config.f_maps) == ("asteris4", 4, 8)
+    assert config.num_blocks == (1, 1, 2)
     assert not config.initialize_from_official
     assert config.official_checkpoint is None
     config.validate()
@@ -67,6 +69,29 @@ def test_paper_config_defaults_to_random_ground_initialization():
             initialize_from_official=True,
             official_checkpoint="ASTERIS8_nrcshort.pth",
         ).validate()
+
+
+def test_compact_asteris4_is_materially_smaller_and_backpropagates():
+    config = PaperAsterisConfig()
+    compact = build_asteris_model(
+        config.model, f_maps=config.f_maps, num_blocks=config.num_blocks,
+        num_refinement_blocks=config.num_refinement_blocks, heads=config.heads,
+    )
+    full = build_asteris_model(
+        "asteris8", f_maps=24, num_blocks=(4, 6, 6, 8),
+        num_refinement_blocks=4, heads=(1, 2, 4, 8),
+    )
+    compact_count = sum(parameter.numel() for parameter in compact.parameters())
+    full_count = sum(parameter.numel() for parameter in full.parameters())
+    assert compact_count < full_count / 50
+    data = torch.randn(1, 1, 4, 16, 16)
+    target = torch.randn_like(data)
+    mask = torch.ones_like(data)
+    prediction = compact(data)
+    loss = paper_asteris_loss(prediction, target, mask, loss_scale=1.0)[0]
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert any(parameter.grad is not None for parameter in compact.parameters())
 
 
 def test_rkz50_split_is_by_four_independent_fields():
