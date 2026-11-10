@@ -244,24 +244,26 @@ def prepare_paper_dataset(
         # A newly generated image-only manifest can be shared by background
         # ablations: freeze both frame membership and registration across arms.
         split = frozen_manifest.copy(deep=True)
-        required = {'frame_id', 'sequence', 'field_id', 'split_strategy', 'frame_index', 'split',
-                    'product_path', 'filename', 'alignment_dx', 'alignment_dy'}
+        required = {'frame_id', 'sequence', 'frame_index', 'split', 'product_path',
+                    'filename', 'alignment_dx', 'alignment_dy'}
         if not required.issubset(split.columns) or split.frame_id.duplicated().any():
             raise ValueError('Invalid frozen experiment manifest')
         if set(split.sequence.astype(str)) != set(map(str, sequences)):
             raise ValueError('Frozen sequences differ from requested sequences')
         if not split.split.isin(['train', 'validation', 'test', 'guard']).all():
             raise ValueError('Unknown frozen split')
-        if not split.split_strategy.eq('independent_sky_field').all():
-            raise ValueError('Formal ASTERIS training requires independent sky-field splits')
-        if (split.groupby('field_id').split.nunique() != 1).any():
-            raise ValueError('One sky field appears in multiple splits')
         if not np.isfinite(split[['alignment_dx', 'alignment_dy']].to_numpy(float)).all():
             raise ValueError('Invalid frozen registration')
         for value in split.product_path:
             resolved = (input_root / value).resolve()
             if not resolved.is_relative_to(input_root.resolve()) or not resolved.is_file():
                 raise ValueError('Missing or unsafe frozen product path')
+        if not {'field_id', 'split_strategy'}.issubset(split.columns):
+            raise ValueError('Formal ASTERIS training requires independent sky-field metadata')
+        if not split.split_strategy.eq('independent_sky_field').all():
+            raise ValueError('Formal ASTERIS training requires independent sky-field splits')
+        if (split.groupby('field_id').split.nunique() != 1).any():
+            raise ValueError('One sky field appears in multiple splits')
         manifest_root.mkdir(parents=True, exist_ok=True)
     split.to_csv(manifest_root / "split_manifest.csv", index=False, encoding="utf-8-sig")
     detector_mask = load_detector_mask(dataset_root)
