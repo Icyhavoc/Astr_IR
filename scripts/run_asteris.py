@@ -1,4 +1,4 @@
-"""Main ASTERIS entry: paper-style multi-exposure ASTERIS8 (160/400 profiles)."""
+"""Main RKZ50 ASTERIS entry with independent-field splits and blind selection."""
 
 from __future__ import annotations
 
@@ -13,22 +13,21 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from astr_ir.asteris.paper_pipeline import (
     PaperAsterisConfig,
+    RKZ50_FIELD_ASSIGNMENTS,
     prepare_paper_dataset,
     run_paper_inference,
+    select_checkpoint_by_detection,
+    selected_checkpoint,
     train_paper_model,
 )
 
 
-PROFILES = {
-    "160": ("90000002", "90000003"),
-    "400": ("90000002", "90000003", "90000004", "90000005_1", "90000005_2"),
-}
+SEQUENCES = tuple(RKZ50_FIELD_ASSIGNMENTS)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=tuple(PROFILES), required=True)
-    parser.add_argument("--stage", choices=("prepare", "train", "infer", "all"), required=True)
+    parser.add_argument("--stage", choices=("prepare", "train", "select", "infer"), required=True)
     parser.add_argument(
         "--input-root", type=Path, default=PROJECT_ROOT / "data" / "processed" / "background"
     )
@@ -37,6 +36,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--selection-table", type=Path,
+                        help="Frozen catalog-free validation injection metrics for --stage select")
+    parser.add_argument("--max-false-peaks-per-image", type=float, default=0.5)
+    parser.add_argument("--flux-response-tolerance", type=float, default=0.05)
     parser.add_argument("--device")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--patch-size", type=int, default=128)
@@ -48,17 +51,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--evaluation-sequences",
         nargs="+",
-        default=["90000002", "90000003"],
-        help="Held-out sequences used for the primary 160-vs-400 comparison.",
+        default=["90000005_1", "90000005_2"],
+        help="Frozen test-field visits; both defaults are the same independent sky field.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    sequences = PROFILES[args.profile]
     output_root = args.output_root or (
-        PROJECT_ROOT / "data" / "processed" / f"asteris_paper_{args.profile}"
+        PROJECT_ROOT / "data" / "processed" / "asteris_rkz50_field_split"
     )
     config = replace(
         PaperAsterisConfig(),
@@ -69,24 +71,35 @@ def main() -> None:
         inference_tile_size=args.inference_tile_size,
         inference_overlap=args.inference_overlap,
     )
-    if args.stage in {"prepare", "all"}:
+    if args.stage == "prepare":
         split, stacks = prepare_paper_dataset(
             args.input_root,
             args.dataset_root,
             output_root,
-            sequences=sequences,
+            sequences=SEQUENCES,
             config=config,
+            field_assignments=RKZ50_FIELD_ASSIGNMENTS,
         )
         print("frame split")
         print(split.groupby(["sequence", "split"]).size().to_string())
         print("paper stacks")
         print(stacks[["sequence", "split", "frames"]].to_string(index=False))
-    checkpoint = args.checkpoint or output_root / "checkpoints" / "best_checkpoint.pt"
-    if args.stage in {"train", "all"}:
+    if args.stage == "train":
         checkpoint, history = train_paper_model(output_root, config=config, device=args.device)
-        print(f"best checkpoint: {checkpoint}")
+        print(f"last checkpoint: {checkpoint}")
+        print("formal checkpoint remains pending blind-injection detection selection")
         print(history.tail().to_string(index=False))
-    if args.stage in {"infer", "all"}:
+    if args.stage == "select":
+        if args.selection_table is None:
+            raise ValueError("--stage select requires --selection-table")
+        checkpoint = select_checkpoint_by_detection(
+            output_root, args.selection_table,
+            max_false_peaks_per_image=args.max_false_peaks_per_image,
+            flux_response_tolerance=args.flux_response_tolerance,
+        )
+        print(f"detection-selected checkpoint: {checkpoint}")
+    if args.stage == "infer":
+        checkpoint = args.checkpoint or selected_checkpoint(output_root)
         stats = run_paper_inference(
             args.input_root,
             args.dataset_root,

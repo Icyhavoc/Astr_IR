@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 import random
 import time
-from typing import Sequence
+from typing import Mapping, Sequence
 import warnings
 
 import numpy as np
@@ -28,13 +28,23 @@ from astr_ir.registration import load_science, masked_shift
 from scipy.stats import sigmaclip
 from torch.utils.data import DataLoader, Dataset
 
-from astr_ir.split_manifest import build_split_manifest
+from astr_ir.split_manifest import build_split_manifest, assign_independent_field_splits
 from astr_ir.background.processor import neighbor_difference_noise
 from astr_ir.dq import build_dq, load_detector_mask, write_fits_with_dq
 
-from .dataset import relabel_manifest_for_patch_t
 from .inference import infer_volume
 from .model import build_asteris_model, upstream_source_sha256
+
+
+# Four independent pointings. 90000005_1/2 are two visits to the same sky
+# field and therefore must never be separated across learned-model splits.
+RKZ50_FIELD_ASSIGNMENTS = {
+    "90000002": ("field_90000002", "train"),
+    "90000003": ("field_90000003", "validation"),
+    "90000004": ("field_90000004", "train"),
+    "90000005_1": ("field_90000005", "test"),
+    "90000005_2": ("field_90000005", "test"),
+}
 from .preprocessing import fill_invalid_with_temporal_mean
 
 
@@ -71,6 +81,9 @@ class PaperAsterisConfig:
     scheduler_t_max: int = 2_000_000
     loss_scale: float = 1e6
     patience: int = 6
+    selection_checkpoint_interval: int = 1
+    selection_max_false_peaks_per_image: float = 0.5
+    selection_flux_response_tolerance: float = 0.05
     seed: int = 20260825
     inference_tile_size: int = 128
     inference_overlap: int = 16
@@ -93,6 +106,10 @@ class PaperAsterisConfig:
             raise ValueError("Training sizes and epochs must be positive")
         if self.scale_factor <= 0:
             raise ValueError("scale_factor must be positive")
+        if self.selection_checkpoint_interval < 1:
+            raise ValueError("selection_checkpoint_interval must be positive")
+        if self.selection_max_false_peaks_per_image < 0 or not 0 < self.selection_flux_response_tolerance < 1:
+            raise ValueError("Invalid detection-selection constraints")
         if self.initialize_from_official or self.official_checkpoint is not None:
             raise ValueError(
                 "Formal RKZ50 training requires random initialization; released JWST weights "
@@ -203,6 +220,7 @@ def prepare_paper_dataset(
     sequences: Sequence[str],
     config: PaperAsterisConfig = PaperAsterisConfig(),
     frozen_manifest: pd.DataFrame | None = None,
+    field_assignments: Mapping[str, tuple[str, str]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Freeze splits and materialize paper-style normalized training stacks."""
 
@@ -219,19 +237,25 @@ def prepare_paper_dataset(
             manifest_root / "split_manifest.csv",
             sequences=tuple(sequences),
         )
-        split = relabel_manifest_for_patch_t(split, 8)
+        if field_assignments is None:
+            raise ValueError("Formal ASTERIS preparation requires independent sky-field assignments")
+        split = assign_independent_field_splits(split, field_assignments)
     else:
         # A newly generated image-only manifest can be shared by background
         # ablations: freeze both frame membership and registration across arms.
         split = frozen_manifest.copy(deep=True)
-        required = {'frame_id', 'sequence', 'frame_index', 'split', 'product_path',
-                    'filename', 'alignment_dx', 'alignment_dy'}
+        required = {'frame_id', 'sequence', 'field_id', 'split_strategy', 'frame_index', 'split',
+                    'product_path', 'filename', 'alignment_dx', 'alignment_dy'}
         if not required.issubset(split.columns) or split.frame_id.duplicated().any():
             raise ValueError('Invalid frozen experiment manifest')
         if set(split.sequence.astype(str)) != set(map(str, sequences)):
             raise ValueError('Frozen sequences differ from requested sequences')
         if not split.split.isin(['train', 'validation', 'test', 'guard']).all():
             raise ValueError('Unknown frozen split')
+        if not split.split_strategy.eq('independent_sky_field').all():
+            raise ValueError('Formal ASTERIS training requires independent sky-field splits')
+        if (split.groupby('field_id').split.nunique() != 1).any():
+            raise ValueError('One sky field appears in multiple splits')
         if not np.isfinite(split[['alignment_dx', 'alignment_dy']].to_numpy(float)).all():
             raise ValueError('Invalid frozen registration')
         for value in split.product_path:
@@ -461,8 +485,11 @@ def train_paper_model(
     scaler = torch.amp.GradScaler("cuda", enabled=config.amp and device_obj.type == "cuda")
     checkpoint_root = output_root / "checkpoints"
     checkpoint_root.mkdir(parents=True, exist_ok=True)
-    best_path, last_path = checkpoint_root / "best_checkpoint.pt", checkpoint_root / "last_checkpoint.pt"
-    history, best_loss, stale = [], float("inf"), 0
+    candidate_root = checkpoint_root / "candidates"
+    candidate_root.mkdir(parents=True, exist_ok=True)
+    last_path = checkpoint_root / "last_checkpoint.pt"
+    history, lowest_validation_loss = [], float("inf")
+    lowest_validation_candidate = None
     amp_enabled = bool(config.amp and device_obj.type == "cuda")
     training_started = time.monotonic()
     for epoch in range(config.epochs):
@@ -541,28 +568,121 @@ def train_paper_model(
             "initialization_checkpoint": None,
             "initialization_domain": "RKZ50 ground-based training only",
             "jwst_weights_used": False,
-            "best_validation_loss": min(best_loss, float(validation_mean[0])),
+            "lowest_validation_loss": min(lowest_validation_loss, float(validation_mean[0])),
+            "formal_selection_status": "pending_blind_injection_detection_evaluation",
+            "formal_selection_metric": "validation injection completeness at fixed false peaks per image",
             "history": history,
         }
         torch.save(state, last_path)
-        if validation_mean[0] < best_loss:
-            best_loss, stale = float(validation_mean[0]), 0
-            torch.save(state, best_path)
-        else:
-            stale += 1
+        candidate_path = candidate_root / f"epoch_{epoch + 1:03d}.pt"
+        save_candidate = ((epoch + 1) % config.selection_checkpoint_interval == 0
+                          or epoch + 1 == config.epochs)
+        if save_candidate:
+            candidate_state = {key: value for key, value in state.items()
+                               if key not in {"optimizer_state", "scheduler_state"}}
+            torch.save(candidate_state, candidate_path)
+        if save_candidate and validation_mean[0] < lowest_validation_loss:
+            lowest_validation_loss = float(validation_mean[0])
+            lowest_validation_candidate = candidate_path.relative_to(output_root).as_posix()
+            (checkpoint_root / "lowest_validation_loss.json").write_text(json.dumps({
+                "diagnostic_only": True,
+                "checkpoint": lowest_validation_candidate,
+                "validation_loss": lowest_validation_loss,
+                "warning": "Not the formal model-selection criterion",
+            }, indent=2), encoding="utf-8")
         print(
             f"epoch {epoch + 1:03d} train={train_mean[0]:.6f} "
             f"validation={validation_mean[0]:.6f}",
             flush=True,
         )
-        if stale >= config.patience:
-            break
     history_frame = pd.DataFrame(history)
     history_frame.to_csv(checkpoint_root / "training_history.csv", index=False, encoding="utf-8-sig")
     (checkpoint_root / 'training_progress.json').write_text(json.dumps(dict(
-        phase='complete', epochs=len(history), best_validation_loss=best_loss,
+        phase='complete', epochs=len(history), lowest_validation_loss=lowest_validation_loss,
+        lowest_validation_candidate=lowest_validation_candidate,
+        formal_selection_status='pending_blind_injection_detection_evaluation',
         elapsed_seconds=time.monotonic()-training_started, complete=True)), encoding='utf-8')
-    return best_path, history_frame
+    return last_path, history_frame
+
+
+def select_checkpoint_by_detection(
+    output_root: str | Path,
+    metrics_path: str | Path,
+    *,
+    max_false_peaks_per_image: float = 0.5,
+    flux_response_tolerance: float = 0.05,
+) -> Path:
+    """Freeze a formal checkpoint using blind-injection detection metrics.
+
+    The table must have been generated on the independent validation field with
+    the same matched-filter detector used for the input-coadd control. Catalog
+    information is explicitly forbidden. Validation MSE is not consulted.
+    """
+    output_root, metrics_path = Path(output_root), Path(metrics_path)
+    if max_false_peaks_per_image < 0 or not 0 < flux_response_tolerance < 1:
+        raise ValueError("Invalid checkpoint-selection constraints")
+    table = pd.read_csv(metrics_path)
+    required = {
+        "checkpoint", "split", "catalog_used", "threshold_frozen", "evaluation_method",
+        "false_peaks_per_image", "injection_completeness", "median_flux_response",
+    }
+    if not required.issubset(table.columns) or table.empty:
+        raise ValueError(f"Selection table requires columns: {sorted(required)}")
+    if not table.split.eq("validation").all():
+        raise ValueError("Checkpoint selection may use only the independent validation field")
+    catalog_used = table.catalog_used.astype(str).str.lower().isin({"true", "1", "yes"})
+    threshold_frozen = table.threshold_frozen.astype(str).str.lower().isin({"true", "1", "yes"})
+    if catalog_used.any() or not threshold_frozen.all():
+        raise ValueError("Selection requires catalog-free metrics and a threshold frozen before injections")
+    if not table.evaluation_method.eq("matched_filter_same_as_input_control").all():
+        raise ValueError("Selection must use the same matched-filter detector as the input control")
+    numeric = ["false_peaks_per_image", "injection_completeness", "median_flux_response"]
+    values = table[numeric].apply(pd.to_numeric, errors="coerce")
+    if not np.isfinite(values.to_numpy()).all():
+        raise ValueError("Selection metrics must be finite numbers")
+    eligible = table.loc[
+        values.false_peaks_per_image.le(max_false_peaks_per_image)
+        & values.median_flux_response.sub(1.0).abs().le(flux_response_tolerance)
+    ].copy()
+    if eligible.empty:
+        raise ValueError("No checkpoint satisfies the frozen false-peak and flux-response guards")
+    eligible["_flux_error"] = pd.to_numeric(eligible.median_flux_response).sub(1.0).abs()
+    eligible = eligible.sort_values(
+        ["injection_completeness", "false_peaks_per_image", "_flux_error"],
+        ascending=[False, True, True], kind="stable",
+    )
+    selected = eligible.iloc[0]
+    checkpoint = (output_root / str(selected.checkpoint)).resolve()
+    if not checkpoint.is_relative_to(output_root.resolve()) or not checkpoint.is_file():
+        raise ValueError("Selected checkpoint path is missing or outside the run directory")
+    payload = {
+        "checkpoint": checkpoint.relative_to(output_root.resolve()).as_posix(),
+        "checkpoint_sha256": _checkpoint_hash(checkpoint),
+        "selection_table": str(metrics_path.resolve()),
+        "selection_table_sha256": _checkpoint_hash(metrics_path),
+        "criterion": "maximize validation injection completeness subject to frozen guards",
+        "max_false_peaks_per_image": float(max_false_peaks_per_image),
+        "flux_response_tolerance": float(flux_response_tolerance),
+        "selected_metrics": {key: selected[key] for key in required if key != "checkpoint"},
+        "catalog_used": False,
+    }
+    selection_path = output_root / "checkpoints" / "selected_checkpoint.json"
+    selection_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    return checkpoint
+
+
+def selected_checkpoint(output_root: str | Path) -> Path:
+    output_root = Path(output_root)
+    selection_path = output_root / "checkpoints" / "selected_checkpoint.json"
+    if not selection_path.is_file():
+        raise FileNotFoundError("Run detection-based checkpoint selection before formal inference")
+    payload = json.loads(selection_path.read_text(encoding="utf-8"))
+    checkpoint = (output_root / payload["checkpoint"]).resolve()
+    if not checkpoint.is_relative_to(output_root.resolve()) or not checkpoint.is_file():
+        raise ValueError("Frozen selected checkpoint is missing or unsafe")
+    if payload.get("checkpoint_sha256") != _checkpoint_hash(checkpoint):
+        raise ValueError("Selected checkpoint hash changed")
+    return checkpoint
 
 
 def load_paper_model(
@@ -666,11 +786,16 @@ def run_paper_inference(
     evaluation_sequences: Sequence[str] | None = None,
     device: str | None = None,
     overwrite: bool = False,
+    require_detection_selection: bool = True,
 ) -> pd.DataFrame:
     """Write one full-strength ASTERIS8 temporal coadd for each held-out sequence."""
 
     input_root, dataset_root, output_root = Path(input_root), Path(dataset_root), Path(output_root)
     checkpoint_path = Path(checkpoint_path)
+    if require_detection_selection:
+        frozen = selected_checkpoint(output_root)
+        if checkpoint_path.resolve() != frozen.resolve():
+            raise ValueError("Formal inference must use the detection-selected checkpoint")
     if (output_root / "paper_coadd_statistics.csv").exists() and not overwrite:
         raise FileExistsError(output_root / "paper_coadd_statistics.csv")
     split = pd.read_csv(

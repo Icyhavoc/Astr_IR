@@ -1,6 +1,6 @@
 # Astr_IR 红外图像处理
 
-主流程：**flicker → background → Noise2Noise 或 ASTERIS8**。
+主流程：**flicker → background → Noise2Noise 或 RKZ50 仪器专用 ASTERIS**。
 主实验入口保留在 Notebook；可复用算法位于 `src/astr_ir/`。原始数据只读，派生产物写入 `data/processed/`。
 
 ## 主流程入口
@@ -10,11 +10,10 @@
 | 1/f 校正 | [flicker](notebooks/flicker/01_flicker_noise_correction.ipynb) | `scripts/run_flicker.py` |
 | 背景扣除 | [background](notebooks/background/01_background_subtraction.ipynb) | `scripts/run_background.py` |
 | N2N 分支 | [noise2noise](notebooks/noise2noise/01_noise2noise_self_supervised.ipynb) | `scripts/run_noise2noise.py` |
-| ASTERIS 分支 | [ASTERIS8 论文版，160/400 帧](notebooks/asteris/01_asteris8_paper_160_vs_400.ipynb) | `scripts/run_asteris.py --profile 160 或 400` |
+| ASTERIS 分支 | [RKZ50 仪器专用实验](notebooks/asteris/01_rkz50_instrument_asteris.ipynb) | `scripts/run_asteris.py --stage prepare/train/select/infer` |
 
 两个模型分支都只读取 `background_subtracted_*.fits`，不相互串联；`flicker_model_*`、`background_model_*` 不作为后续科学输入。
-ASTERIS 主入口现已统一为论文版；旧版 ASTERIS4/α 混合实验入口已移除。
-项目复用 ASTERIS8 网络架构，但 RKZ50 地基数据的正式训练固定为随机初始化；发布的 JWST NIRCam 权重不作为默认或正式初始化。
+项目复用 ASTERIS 网络架构，但 RKZ50 地基数据的正式训练固定为随机初始化；发布的 JWST NIRCam 权重不作为默认或正式初始化。正式切分按四个独立天区进行，最低 validation MSE 仅作诊断；候选 checkpoint 必须按冻结误检预算下的盲注入完整率选择。
 
 ## 目录
 

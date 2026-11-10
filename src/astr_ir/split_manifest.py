@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 import numpy as np
 import pandas as pd
 
@@ -45,6 +45,42 @@ def _split_labels(count: int) -> list[str]:
         + ["guard"] * guard
         + ["test"] * test_count
     )
+
+
+def assign_independent_field_splits(
+    manifest: pd.DataFrame,
+    assignments: Mapping[str, tuple[str, str]],
+) -> pd.DataFrame:
+    """Assign whole sky fields to one split; never split a field by exposure.
+
+    ``assignments`` maps sequence name to ``(field_id, split)``. Multiple
+    sequences may share a field ID, but every such sequence must receive the
+    same split. This is the formal learned-model isolation rule; the original
+    chronological frame split remains available only to reproduce old runs.
+    """
+    required = {"sequence", "frame_id"}
+    if not required.issubset(manifest.columns) or manifest.frame_id.duplicated().any():
+        raise ValueError("Invalid manifest for independent-field assignment")
+    sequences = set(manifest.sequence.astype(str))
+    if sequences != set(map(str, assignments)):
+        raise ValueError("Field assignments must cover exactly the manifest sequences")
+    allowed = {"train", "validation", "test"}
+    normalized = {str(sequence): (str(field), str(split))
+                  for sequence, (field, split) in assignments.items()}
+    if any(not field or split not in allowed for field, split in normalized.values()):
+        raise ValueError("Each field assignment needs a nonempty field_id and train/validation/test split")
+    field_roles: dict[str, set[str]] = {}
+    for field, split in normalized.values():
+        field_roles.setdefault(field, set()).add(split)
+    if any(len(roles) != 1 for roles in field_roles.values()):
+        raise ValueError("One sky field cannot appear in multiple splits")
+    if set().union(*field_roles.values()) != allowed:
+        raise ValueError("Independent-field split requires train, validation, and test fields")
+    result = manifest.copy(deep=True)
+    result["field_id"] = result.sequence.astype(str).map(lambda value: normalized[value][0])
+    result["split"] = result.sequence.astype(str).map(lambda value: normalized[value][1])
+    result["split_strategy"] = "independent_sky_field"
+    return result
 
 
 def build_split_manifest(

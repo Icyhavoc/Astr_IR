@@ -11,7 +11,7 @@ Notebook 是实验入口，`scripts/run_*.py` 是四个对应的批处理入口�
 | `flicker/` | 掩膜、1/f 模型、质量门、科学图与模型图输出 |
 | `background/` | 自动源掩膜、二维背景估计、质量门与扣除 |
 | `noise2noise/` | 帧级切分、配对、2D DnCNN、训练与逐帧推理 |
-| `asteris/paper_pipeline.py` | 当前 ASTERIS8：多曝光 8→8 训练、时间合成与科学共加 |
+| `asteris/paper_pipeline.py` | RKZ50 仪器专用 ASTERIS：独立天区切分、多曝光自监督训练、冻结盲注入选择与科学共加 |
 | `asteris/model.py` | 只读加载上一级原作者源码，记录源码校验和 |
 | `dq.py`、`registration.py`、`blind_registration.py`、`split_manifest.py` | 坏像元标志、单次 FITS/DQ 读取、图像自配准与两分支共用的冻结帧清单 |
 | `evaluation/`、`asteris/paper_evaluation.py` | 可选盲检、伪源注入、性能评估 |
@@ -20,6 +20,7 @@ Notebook 是实验入口，`scripts/run_*.py` 是四个对应的批处理入口�
 ASTERIS 的 `dataset.py`、`preprocessing.py` 是当前论文流程与历史实验共享组件。
 `processor.py`、`inference.py` 仍由历史模型评估和测试引用，因此保留；不能因旧 Notebook 已删除而一并删掉。
 ASTERIS 正式流程只复用原作者网络架构，RKZ50 训练从随机权重开始；JWST NIRCam 发布权重只能进入另行命名的域迁移消融，不能进入主 CLI 或主结论。
+正式切分以独立天区为单位：`90000002/04` 训练、`90000003` 验证、同一天区的 `90000005_1/2` 共同作为测试。模型选择以固定每图误检预算内的验证注入完整率为主，并要求通量响应通过护栏；validation MSE 不再定义正式最佳 checkpoint。
 N2N 主入口使用固定强度；历史目标测光标定函数只供旧实验追溯，不参与当前全盲流程。ASTERIS 准备阶段只物化 train/validation stack，测试曝光由推理阶段直接读取科学 FITS。
 
 ## 数据边界

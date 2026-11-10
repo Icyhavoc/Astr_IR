@@ -1,22 +1,22 @@
-# ASTERIS8 论文版
+# RKZ50 仪器专用 ASTERIS
 
 ## 唯一主实验入口
 
-- Notebook：`notebooks/asteris/01_asteris8_paper_160_vs_400.ipynb`
+- Notebook：`notebooks/asteris/01_rkz50_instrument_asteris.ipynb`
 - CLI：`scripts/run_asteris.py`（原 `run_asteris_paper.py`）
 - 实现：`src/astr_ir/asteris/paper_pipeline.py`
-- 输出：新实验在 `data/processed/asteris_paper_<profile>_<run>/` 建独立目录
+- 输出：新实验默认在 `data/processed/asteris_rkz50_field_split/`，正式实验仍建议添加独立 run 名称
 
 旧 ASTERIS4/α 混合 Notebook 和 CLI 已移除；其权重、FITS 和评估表已移至
 `D:/Astr_IR/_cleanup_backup/assets_20260826/data/processed/asteris/` 及同层 `evaluation/asteris/`。
 它们仍可恢复，但不再占用主流程数据目录；被引用的底层组件继续保留。
-`run_asteris.py` 现在要求 `--profile 160` 或 `--profile 400`，不再接受旧入口的 `--model asteris4`、`--stage calibrate` 等参数。
+旧 160/400 结果只用于历史追溯。正式 CLI 不再按训练帧数命名 profile，而使用 `prepare → train → select → infer` 四个明确阶段。
 
 ## 模型与数据流
 
 使用原作者 ASTERIS8 **网络架构**，但针对 RKZ50 地基红外数据从随机权重开始训练；输入来自 background 科学图：
 
-1. 固定帧级切分，配准及 DQ 有效区处理。
+1. 按独立天区冻结切分，随后进行配准及 DQ 有效区处理。
 2. 16 张独立曝光随机抽样并交错为 8 帧 input / 8 帧 target。
 3. 时间轴及全 3D 的 3σ clipping、MSE 帧排序、全局 z-score、`/4 + 1`。
 4. 两半独立中值居中，官方旋转/翻转及 input-target 交换。
@@ -29,11 +29,15 @@ AdamW：学习率 `1.5e-4`、weight decay `1e-4`，余弦 `T_max=2,000,000`。
 原作者网络源码从上一级 `../Asteris/ASTERIS_THU-main/` 只读加载；checkpoint 记录源码 SHA-256、`weight_initialization=random` 和 `jwst_weights_used=false`。
 缺少该源码树时应先恢复依赖，不能换成旧模型继续跑。发布的 `ASTERIS8_nrcshort` 权重来自 JWST NIRCam，与 RKZ50 的像元尺度、PSF、大气背景和探测器噪声域显著不同，正式主流程禁止加载；若研究迁移学习，只能另建明确命名的域迁移消融，不能作为主结论。
 
-## 切分与比较
+## 切分与模型选择
 
-每序列 80 帧固定为 `44 train / 16 validation / 16 test / 4 guard`。
-160 profile 用前两个序列；400 profile 用五个序列。
-主比较始终使用共同的 `90000002`、`90000003` 冻结测试曝光。
+当前数据实际只有四个独立指向；`90000005_1` 与 `90000005_2` 是同一天区的两次访问。正式切分固定为：
+
+- train：`90000002`、`90000004`；
+- validation：`90000003`；
+- test：`90000005_1`、`90000005_2`，两组不得拆开。
+
+训练保存候选 epoch，但不会把最低 validation MSE 命名为正式最佳模型。`select` 阶段读取冻结的全盲注入评估表，只在每图误检数不超过预算且中位通量响应位于容差内的候选中，最大化注入完整率。评估必须使用与输入共加完全相同的曝光、背景、DQ、配准和 matched-filter 检测器；星表不得参与阈值或 checkpoint 选择。
 
 科学 FITS 保留有效覆盖与 DQ。网络内部有限填充值不算作真实测量；新的 manifest 不使用星表位置保护弱源。
 处理、训练和推理不会把 catalog overlay 当作输入。
@@ -43,12 +47,14 @@ AdamW：学习率 `1.5e-4`、weight decay `1e-4`，余弦 `T_max=2,000,000`。
 以下 prepare 示例只构建 train/validation stack，不训练，也不物化测试 stack。输出目录必须为空：
 
 ```powershell
-python scripts/run_asteris.py --profile 160 --stage prepare --output-root data/processed/asteris_blind_160
-python scripts/run_asteris.py --profile 400 --stage prepare --output-root data/processed/asteris_blind_400
+python scripts/run_asteris.py --stage prepare --output-root data/processed/asteris_rkz50_field_split_run1
+python scripts/run_asteris.py --stage train --output-root data/processed/asteris_rkz50_field_split_run1
+python scripts/run_asteris.py --stage select --output-root data/processed/asteris_rkz50_field_split_run1 `
+  --selection-table data/processed/evaluation/run1/checkpoint_detection_metrics.csv
+python scripts/run_asteris.py --stage infer --output-root data/processed/asteris_rkz50_field_split_run1
 ```
 
-训练、推理使用同一输出目录，分别指定 `--stage train`、`--stage infer`。主 CLI 不提供 JWST 权重初始化开关，训练固定从随机权重开始。
-checkpoint 在推理时核对冻结 split manifest 的 SHA-256。当前背景参数仍需验证，本次未运行 prepare、训练或推理。
+主 CLI 不提供 JWST 权重初始化开关，训练固定从随机权重开始。正式推理必须使用 `selected_checkpoint.json` 冻结的 checkpoint；直接把 last checkpoint 或最低 MSE checkpoint 用作正式结果会被拒绝。checkpoint 在推理时同时核对冻结 split manifest 与选择记录。当前背景参数仍需验证，本次未运行 prepare、正式训练或推理。
 辅助的多曝光伪源评估、160/400 汇总、星表标注都在 `scripts/evaluation/`。
 
 ## 已有历史结果（旧预处理）

@@ -17,11 +17,15 @@ from astr_ir.asteris.inference import denoise_array
 from astr_ir.asteris.model import build_asteris_model
 from astr_ir.asteris.paper_pipeline import (
     PaperAsterisConfig,
+    RKZ50_FIELD_ASSIGNMENTS,
     denoise_registered_exposures,
     paper_asteris_loss,
     paper_sigma_clip,
     process_nmean,
+    select_checkpoint_by_detection,
+    selected_checkpoint,
 )
+from astr_ir.split_manifest import assign_independent_field_splits
 from astr_ir.asteris.preprocessing import (
     build_noise_estimation_mask,
     circular_source_mask,
@@ -63,6 +67,40 @@ def test_paper_config_defaults_to_random_ground_initialization():
             initialize_from_official=True,
             official_checkpoint="ASTERIS8_nrcshort.pth",
         ).validate()
+
+
+def test_rkz50_split_is_by_four_independent_fields():
+    rows = pd.DataFrame({
+        "frame_id": [f"{sequence}:000" for sequence in RKZ50_FIELD_ASSIGNMENTS],
+        "sequence": list(RKZ50_FIELD_ASSIGNMENTS),
+    })
+    split = assign_independent_field_splits(rows, RKZ50_FIELD_ASSIGNMENTS)
+    assert split.groupby("field_id").split.nunique().eq(1).all()
+    assert split.loc[split.sequence.str.startswith("90000005"), "field_id"].nunique() == 1
+    assert set(split.split) == {"train", "validation", "test"}
+
+
+def test_detection_selection_enforces_false_peak_and_flux_guards(tmp_path: Path):
+    output = tmp_path / "run"
+    candidates = output / "checkpoints" / "candidates"
+    candidates.mkdir(parents=True)
+    for epoch in (1, 2, 3):
+        (candidates / f"epoch_{epoch:03d}.pt").write_bytes(f"epoch {epoch}".encode())
+    table = pd.DataFrame({
+        "checkpoint": [f"checkpoints/candidates/epoch_{epoch:03d}.pt" for epoch in (1, 2, 3)],
+        "split": ["validation"] * 3,
+        "catalog_used": [False] * 3,
+        "threshold_frozen": [True] * 3,
+        "evaluation_method": ["matched_filter_same_as_input_control"] * 3,
+        "false_peaks_per_image": [0.4, 0.8, 0.3],
+        "injection_completeness": [0.60, 0.95, 0.70],
+        "median_flux_response": [1.01, 1.00, 1.12],
+    })
+    metrics = tmp_path / "metrics.csv"
+    table.to_csv(metrics, index=False)
+    chosen = select_checkpoint_by_detection(output, metrics)
+    assert chosen.name == "epoch_001.pt"
+    assert selected_checkpoint(output) == chosen
 
 
 def test_sigma_clipping_preserves_shape_and_known_source_flux():
@@ -336,15 +374,19 @@ def test_paper_prepare_keeps_test_split_without_materializing_test_stack(tmp_pat
     import astr_ir.asteris.paper_pipeline as pipeline
 
     input_root = tmp_path / "input"
-    sequence_root = input_root / "s"
-    sequence_root.mkdir(parents=True)
     rows = []
-    for index, split in enumerate(("train", "validation", "test")):
+    for index, (sequence, split) in enumerate((('train_field', 'train'),
+                                                ('validation_field', 'validation'),
+                                                ('test_field', 'test'))):
+        sequence_root = input_root / sequence
+        sequence_root.mkdir(parents=True)
         path = sequence_root / f"{split}.fits"
         path.touch()
-        rows.append(dict(frame_id=f"s:{index}", sequence="s", frame_index=index,
+        rows.append(dict(frame_id=f"{sequence}:{index}", sequence=sequence,
+                         field_id=sequence, split_strategy='independent_sky_field', frame_index=index,
                          split=split, product_path=f"s/{split}.fits", filename=path.name,
                          alignment_dx=0.0, alignment_dy=0.0))
+        rows[-1]['product_path'] = f"{sequence}/{split}.fits"
     frozen = pd.DataFrame(rows)
     monkeypatch.setattr(pipeline, "load_detector_mask", lambda _: np.zeros((32, 32), bool))
     monkeypatch.setattr(pipeline, "_load_registered_stack",
@@ -357,12 +399,14 @@ def test_paper_prepare_keeps_test_split_without_materializing_test_stack(tmp_pat
 
     output_root = tmp_path / "output"
     split, stacks = pipeline.prepare_paper_dataset(
-        input_root, tmp_path / "raw", output_root, sequences=("s",), frozen_manifest=frozen
+        input_root, tmp_path / "raw", output_root,
+        sequences=("train_field", "validation_field", "test_field"), frozen_manifest=frozen
     )
     assert set(split.split) == {"train", "validation", "test"}
     assert set(stacks.split) == {"train", "validation"}
     assert not list((output_root / "paper_stacks").glob("*test*"))
     with pytest.raises(FileExistsError, match="fresh output root"):
         pipeline.prepare_paper_dataset(
-            input_root, tmp_path / "raw", output_root, sequences=("s",), frozen_manifest=frozen
+            input_root, tmp_path / "raw", output_root,
+            sequences=("train_field", "validation_field", "test_field"), frozen_manifest=frozen
         )
