@@ -44,7 +44,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-samples-per-sequence", type=int, default=16)
     parser.add_argument("--inference-tile-size", type=int, default=128)
     parser.add_argument("--inference-overlap", type=int, default=16)
-    parser.add_argument("--random-initialization", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
         "--evaluation-sequences",
@@ -69,7 +68,6 @@ def main() -> None:
         validation_samples_per_sequence=args.validation_samples_per_sequence,
         inference_tile_size=args.inference_tile_size,
         inference_overlap=args.inference_overlap,
-        initialize_from_official=not args.random_initialization,
     )
     if args.stage in {"prepare", "all"}:
         split, stacks = prepare_paper_dataset(

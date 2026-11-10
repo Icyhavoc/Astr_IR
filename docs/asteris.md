@@ -14,7 +14,7 @@
 
 ## 模型与数据流
 
-使用原作者 ASTERIS8 网络及官方初始化，输入来自 background 科学图：
+使用原作者 ASTERIS8 **网络架构**，但针对 RKZ50 地基红外数据从随机权重开始训练；输入来自 background 科学图：
 
 1. 固定帧级切分，配准及 DQ 有效区处理。
 2. 16 张独立曝光随机抽样并交错为 8 帧 input / 8 帧 target。
@@ -26,8 +26,8 @@
 AdamW：学习率 `1.5e-4`、weight decay `1e-4`，余弦 `T_max=2,000,000`。
 8 GB GPU 使用 AMP；反向传播去掉公共损失尺度 `1e6`，日志保留官方尺度。
 
-原作者模型从上一级 `../Asteris/ASTERIS_THU-main/` 只读加载；checkpoint 记录源码 SHA-256。
-缺少该源码树或官方初始化权重时，应先恢复依赖，不能换成旧模型继续跑。
+原作者网络源码从上一级 `../Asteris/ASTERIS_THU-main/` 只读加载；checkpoint 记录源码 SHA-256、`weight_initialization=random` 和 `jwst_weights_used=false`。
+缺少该源码树时应先恢复依赖，不能换成旧模型继续跑。发布的 `ASTERIS8_nrcshort` 权重来自 JWST NIRCam，与 RKZ50 的像元尺度、PSF、大气背景和探测器噪声域显著不同，正式主流程禁止加载；若研究迁移学习，只能另建明确命名的域迁移消融，不能作为主结论。
 
 ## 切分与比较
 
@@ -47,7 +47,7 @@ python scripts/run_asteris.py --profile 160 --stage prepare --output-root data/p
 python scripts/run_asteris.py --profile 400 --stage prepare --output-root data/processed/asteris_blind_400
 ```
 
-训练、推理使用同一输出目录，分别指定 `--stage train`、`--stage infer`。
+训练、推理使用同一输出目录，分别指定 `--stage train`、`--stage infer`。主 CLI 不提供 JWST 权重初始化开关，训练固定从随机权重开始。
 checkpoint 在推理时核对冻结 split manifest 的 SHA-256。当前背景参数仍需验证，本次未运行 prepare、训练或推理。
 辅助的多曝光伪源评估、160/400 汇总、星表标注都在 `scripts/evaluation/`。
 

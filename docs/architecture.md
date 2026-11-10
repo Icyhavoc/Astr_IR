@@ -19,6 +19,7 @@ Notebook 是实验入口，`scripts/run_*.py` 是四个对应的批处理入口�
 
 ASTERIS 的 `dataset.py`、`preprocessing.py` 是当前论文流程与历史实验共享组件。
 `processor.py`、`inference.py` 仍由历史模型评估和测试引用，因此保留；不能因旧 Notebook 已删除而一并删掉。
+ASTERIS 正式流程只复用原作者网络架构，RKZ50 训练从随机权重开始；JWST NIRCam 发布权重只能进入另行命名的域迁移消融，不能进入主 CLI 或主结论。
 N2N 主入口使用固定强度；历史目标测光标定函数只供旧实验追溯，不参与当前全盲流程。ASTERIS 准备阶段只物化 train/validation stack，测试曝光由推理阶段直接读取科学 FITS。
 
 ## 数据边界

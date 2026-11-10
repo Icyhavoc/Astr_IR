@@ -14,6 +14,7 @@
 
 两个模型分支都只读取 `background_subtracted_*.fits`，不相互串联；`flicker_model_*`、`background_model_*` 不作为后续科学输入。
 ASTERIS 主入口现已统一为论文版；旧版 ASTERIS4/α 混合实验入口已移除。
+项目复用 ASTERIS8 网络架构，但 RKZ50 地基数据的正式训练固定为随机初始化；发布的 JWST NIRCam 权重不作为默认或正式初始化。
 
 ## 目录
 

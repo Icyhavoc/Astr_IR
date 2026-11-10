@@ -30,7 +30,8 @@ nb["cells"] = [
         本次没有训练；新预处理/联合检测入口为 `notebooks/evaluation/02_blind_pre_asteris_pipeline.ipynb`。
         下一次模型实验应另建输出目录，重新 prepare/train，不能把新图像与旧缓存/坐标清单混用。
 
-        本 Notebook 是更新后的主实验入口。它使用原作者 ASTERIS8 网络和官方初始化，
+        本 Notebook 是更新后的主实验入口。它使用原作者 ASTERIS8 网络架构，但针对 RKZ50
+        地基红外数据随机初始化；发布的 JWST NIRCam 权重不进入正式流程。
         将16张独立曝光交错为8帧输入/8帧目标，执行时间轴与全局3σ裁剪、论文损失、
         八帧时间合成和真正的多曝光盲伪源注入。旧的单图复制评估和 α 混合不再用于本实验。
 

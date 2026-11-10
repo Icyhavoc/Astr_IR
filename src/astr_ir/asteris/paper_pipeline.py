@@ -1,6 +1,6 @@
 """Paper-faithful ASTERIS8 training and multi-exposure coadd inference.
 
-This module follows the released ASTERIS workflow: sixteen independent
+This module follows the released ASTERIS architecture and workflow: sixteen independent
 exposures form interlaced eight-frame input/target volumes, temporal and global
 3-sigma clipping are applied before training, each half is median-centred, the
 official ASTERIS8 network is optimized with stack SmoothL1 plus temporal-mean
@@ -75,14 +75,16 @@ class PaperAsterisConfig:
     inference_tile_size: int = 128
     inference_overlap: int = 16
     amp: bool = True
-    initialize_from_official: bool = True
-    official_checkpoint: str = (
-        "D:/Astr_IR/Asteris/ASTERIS_THU-main/pth/ASTERIS8_nrcshort/ASTERIS8_nrcshort.pth"
-    )
+    # RKZ50 ground-based data are a different instrument/noise domain from
+    # JWST NIRCam.  The formal workflow reuses the architecture, never the
+    # released JWST weights.  These legacy fields remain only so old configs
+    # fail with an explicit scientific-domain error instead of being ignored.
+    initialize_from_official: bool = False
+    official_checkpoint: str | None = None
 
     def validate(self) -> None:
         if self.model.lower() != "asteris8" or self.patch_t != 8:
-            raise ValueError("Paper workflow requires the official eight-slice ASTERIS8 model")
+            raise ValueError("Paper workflow requires the released eight-slice ASTERIS8 architecture")
         if self.patch_size % 8 or self.inference_tile_size % 8:
             raise ValueError("ASTERIS8 spatial sizes must be divisible by 8")
         if self.patch_size < 32 or self.inference_tile_size < 32:
@@ -91,6 +93,11 @@ class PaperAsterisConfig:
             raise ValueError("Training sizes and epochs must be positive")
         if self.scale_factor <= 0:
             raise ValueError("scale_factor must be positive")
+        if self.initialize_from_official or self.official_checkpoint is not None:
+            raise ValueError(
+                "Formal RKZ50 training requires random initialization; released JWST weights "
+                "are allowed only in a separately named domain-transfer ablation"
+            )
 
 
 def _seed_everything(seed: int) -> None:
@@ -395,12 +402,6 @@ def paper_asteris_loss(
     return total, stack_l1, mean_l2
 
 
-def _official_initialization(model: torch.nn.Module, path: str | Path) -> None:
-    checkpoint = torch.load(Path(path), map_location="cpu", weights_only=False)
-    state = checkpoint.get("model_state_dict", checkpoint)
-    model.network.load_state_dict(state, strict=True)
-
-
 def train_paper_model(
     output_root: str | Path,
     *,
@@ -444,8 +445,6 @@ def train_paper_model(
     model = build_asteris_model(
         "asteris8", f_maps=config.f_maps, num_refinement_blocks=config.num_refinement_blocks
     ).to(device_obj)
-    if config.initialize_from_official:
-        _official_initialization(model, config.official_checkpoint)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
@@ -538,7 +537,10 @@ def train_paper_model(
             "config": asdict(config),
             "split_manifest_sha256": _checkpoint_hash(output_root / "manifests" / "split_manifest.csv"),
             "upstream_source_sha256": upstream_source_sha256("asteris8"),
-            "official_initialization": config.official_checkpoint if config.initialize_from_official else None,
+            "weight_initialization": "random",
+            "initialization_checkpoint": None,
+            "initialization_domain": "RKZ50 ground-based training only",
+            "jwst_weights_used": False,
             "best_validation_loss": min(best_loss, float(validation_mean[0])),
             "history": history,
         }

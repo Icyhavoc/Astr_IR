@@ -231,7 +231,8 @@ def main():
                                   sequences=sequences, config=config, frozen_manifest=common)
             print('Prepared '+method, flush=True)
         save_json(experiment/'training_protocol.json', dict(common_manifest_sha256=sha256(common_path),
-            official_initialization_sha256=sha256(config.official_checkpoint), methods=methods,
+            weight_initialization='random', initialization_checkpoint=None,
+            jwst_weights_used=False, methods=methods,
             seed=config.seed, epochs=config.epochs, architecture='unchanged ASTERIS8',
             frames=400, training_frames=220, validation_frames=80, test_frames=80, guard_frames=20,
             registration='same image-only offsets for both arms', catalog_used=False,

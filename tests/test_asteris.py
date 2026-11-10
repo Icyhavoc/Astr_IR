@@ -53,6 +53,18 @@ def test_original_asteris_adapter_preserves_shape(name, depth, f_maps, blocks, h
     assert output.shape == data.shape
 
 
+def test_paper_config_defaults_to_random_ground_initialization():
+    config = PaperAsterisConfig()
+    assert not config.initialize_from_official
+    assert config.official_checkpoint is None
+    config.validate()
+    with pytest.raises(ValueError, match="random initialization"):
+        PaperAsterisConfig(
+            initialize_from_official=True,
+            official_checkpoint="ASTERIS8_nrcshort.pth",
+        ).validate()
+
+
 def test_sigma_clipping_preserves_shape_and_known_source_flux():
     rng = np.random.default_rng(3)
     stack = rng.normal(0, 1, (8, 32, 32)).astype(np.float32)
